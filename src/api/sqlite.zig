@@ -6,6 +6,7 @@ const c = @cImport({
     @cInclude("sqlite3.h");
 });
 
+// TODO: thread-local statement cache
 pub const Sqlite = struct {
     db: *c.sqlite3,
 
@@ -109,6 +110,76 @@ pub const Sqlite = struct {
         }
     }
 
+    fn parse_column(
+        allocator: std.mem.Allocator,
+        comptime T: type,
+        comptime name: []const u8,
+        index: c_int,
+        stmt: *c.sqlite3_stmt,
+    ) !T {
+        return switch (@typeInfo(T)) {
+            .Int => |info| if (info.bits < 32)
+                @as(T, @intCast(c.sqlite3_column_int(stmt, index)))
+            else
+                @as(T, @intCast(c.sqlite3_column_int64(stmt, index))),
+            .Float => @as(T, @floatCast(c.sqlite3_column_double(stmt, index))),
+            .Optional => |info| blk: {
+                const col_type = c.sqlite3_column_type(stmt, index);
+                if (col_type == c.SQLITE_NULL) break :blk null;
+                break :blk @as(T, try parse_column(allocator, info.child, name, index, stmt));
+            },
+            else => switch (T) {
+                []const u8,
+                []u8,
+                => try allocator.dupe(u8, std.mem.span(c.sqlite3_column_text(stmt, index))),
+                bool => if (c.sqlite3_column_int(stmt, index) == 0) false else true,
+                else => @compileError("Unsupported type for sqlite columning: " ++ @typeName(T)),
+            },
+        };
+    }
+
+    fn parse_row(allocator: std.mem.Allocator, comptime T: type, stmt: *c.sqlite3_stmt) !T {
+        var result: T = undefined;
+
+        const struct_info = @typeInfo(T);
+        if (struct_info != .Struct) @compileError("thing being fetched must be a struct");
+        const struct_fields = struct_info.Struct.fields;
+
+        const col_count: c_int = c.sqlite3_column_count(stmt);
+        var set_fields: [struct_fields.len]bool = .{false} ** struct_fields.len;
+
+        inline for (std.meta.fields(T), 0..) |field, i| {
+            if (@typeInfo(field.type) == .Optional) {
+                @field(result, field.name) = null;
+                set_fields[i] = true;
+            }
+
+            if (field.default_value) |default| {
+                @field(result, field.name) = @as(*const field.type, @ptrCast(@alignCast(default))).*;
+                set_fields[i] = true;
+            }
+        }
+
+        for (0..@intCast(col_count)) |i| {
+            const index: c_int = @intCast(i);
+            const col_name = c.sqlite3_column_name(stmt, index);
+            inline for (struct_fields, 0..) |field, j| {
+                if (std.mem.eql(u8, field.name, std.mem.span(col_name))) {
+                    const value = try parse_column(allocator, field.type, field.name, index, stmt);
+                    @field(result, field.name) = value;
+                    set_fields[j] = true;
+                }
+            }
+        }
+
+        inline for (set_fields[0..], 0..) |set, i| if (!set) {
+            log.err("missing required field: {s}", .{struct_fields[i].name});
+            return error.MissingRequiredField;
+        };
+
+        return result;
+    }
+
     pub fn fetch_optional(
         self: Sqlite,
         allocator: std.mem.Allocator,
@@ -127,45 +198,12 @@ pub const Sqlite = struct {
 
         try bind_params(stmt.?, params);
 
-        var result: T = undefined;
-
         const step_rc = c.sqlite3_step(stmt);
         switch (step_rc) {
-            c.SQLITE_ROW => {
-                const struct_info = @typeInfo(T);
-                if (struct_info != .Struct) @compileError("thing being fetched must be a struct");
-
-                const col_count: c_int = c.sqlite3_column_count(stmt);
-                for (0..@intCast(col_count)) |i| {
-                    const index: c_int = @intCast(i);
-                    const col_name = c.sqlite3_column_name(stmt, index);
-                    inline for (struct_info.Struct.fields) |field| {
-                        if (std.mem.eql(u8, field.name, std.mem.span(col_name))) {
-                            const value = switch (@typeInfo(field.type)) {
-                                .Int => |info| if (info.bits < 32)
-                                    @as(field.type, @intCast(c.sqlite3_column_int(stmt, index)))
-                                else
-                                    @as(field.type, @intCast(c.sqlite3_column_int64(stmt, index))),
-                                .Float => @as(field.type, @floatCast(c.sqlite3_column_double(stmt, index))),
-                                else => switch (field.type) {
-                                    []const u8,
-                                    []u8,
-                                    => try allocator.dupe(u8, std.mem.span(c.sqlite3_column_text(stmt, index))),
-                                    bool => if (c.sqlite3_column_int(stmt, index) == 0) false else true,
-                                    else => @compileError("Unsupported type for sqlite columning: " ++ @typeName(T)),
-                                },
-                            };
-
-                            @field(result, field.name) = value;
-                        }
-                    }
-                }
-            },
+            c.SQLITE_ROW => return try parse_row(allocator, T, stmt.?),
             c.SQLITE_DONE => return null,
             else => unreachable,
         }
-
-        return result;
     }
 
     pub fn fetch_one(
@@ -176,5 +214,36 @@ pub const Sqlite = struct {
         params: anytype,
     ) !T {
         return try self.fetch_optional(allocator, T, sql, params) orelse error.NotFound;
+    }
+
+    pub fn fetch_all(
+        self: Sqlite,
+        allocator: std.mem.Allocator,
+        comptime T: type,
+        comptime sql: []const u8,
+        params: anytype,
+    ) ![]const T {
+        var stmt: ?*c.sqlite3_stmt = null;
+
+        const rc = c.sqlite3_prepare_v2(self.db, sql.ptr, @intCast(sql.len), &stmt, null);
+        if (rc != c.SQLITE_OK) {
+            log.err("sqlite3 prepare failed: {s}", .{c.sqlite3_errmsg(self.db)});
+            return error.FailedPrepare;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        try bind_params(stmt.?, params);
+
+        var list = try std.ArrayListUnmanaged(T).initCapacity(allocator, 0);
+        defer list.deinit(allocator);
+
+        while (true) {
+            const step_rc = c.sqlite3_step(stmt);
+            switch (step_rc) {
+                c.SQLITE_DONE => return try list.toOwnedSlice(allocator),
+                c.SQLITE_ROW => try list.append(allocator, try parse_row(allocator, T, stmt.?)),
+                else => unreachable,
+            }
+        }
     }
 };
