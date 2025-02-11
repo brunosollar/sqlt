@@ -111,7 +111,7 @@ pub const Sqlite = struct {
         }
     }
 
-    fn parse_column(
+    fn parse_field(
         allocator: std.mem.Allocator,
         comptime T: type,
         comptime name: []const u8,
@@ -127,7 +127,7 @@ pub const Sqlite = struct {
             .Optional => |info| blk: {
                 const col_type = c.sqlite3_column_type(stmt, index);
                 if (col_type == c.SQLITE_NULL) break :blk null;
-                break :blk @as(T, try parse_column(allocator, info.child, name, index, stmt));
+                break :blk @as(T, try parse_field(allocator, info.child, name, index, stmt));
             },
             else => switch (T) {
                 []const u8,
@@ -139,7 +139,7 @@ pub const Sqlite = struct {
         };
     }
 
-    fn parse_row(allocator: std.mem.Allocator, comptime T: type, stmt: *c.sqlite3_stmt) !T {
+    fn parse_struct(allocator: std.mem.Allocator, comptime T: type, stmt: *c.sqlite3_stmt) !T {
         var result: T = undefined;
 
         const struct_info = @typeInfo(T);
@@ -166,7 +166,7 @@ pub const Sqlite = struct {
             const col_name = c.sqlite3_column_name(stmt, index);
             inline for (struct_fields, 0..) |field, j| {
                 if (std.mem.eql(u8, field.name, std.mem.span(col_name))) {
-                    const value = try parse_column(allocator, field.type, field.name, index, stmt);
+                    const value = try parse_field(allocator, field.type, field.name, index, stmt);
                     @field(result, field.name) = value;
                     set_fields[j] = 1;
                 }
@@ -199,9 +199,8 @@ pub const Sqlite = struct {
 
         try bind_params(stmt.?, params);
 
-        const step_rc = c.sqlite3_step(stmt);
-        switch (step_rc) {
-            c.SQLITE_ROW => return try parse_row(allocator, T, stmt.?),
+        switch (c.sqlite3_step(stmt)) {
+            c.SQLITE_ROW => return try parse_struct(allocator, T, stmt.?),
             c.SQLITE_DONE => return null,
             else => unreachable,
         }
@@ -239,12 +238,196 @@ pub const Sqlite = struct {
         defer list.deinit(allocator);
 
         while (true) {
-            const step_rc = c.sqlite3_step(stmt);
-            switch (step_rc) {
+            switch (c.sqlite3_step(stmt)) {
                 c.SQLITE_DONE => return try list.toOwnedSlice(allocator),
-                c.SQLITE_ROW => try list.append(allocator, try parse_row(allocator, T, stmt.?)),
+                c.SQLITE_ROW => try list.append(allocator, try parse_struct(allocator, T, stmt.?)),
                 else => unreachable,
             }
         }
     }
+
+    const Column = union(enum) {
+        none,
+        boolean: bool,
+        integer: i64,
+        double: f64,
+        text: []const u8,
+    };
+
+    fn parse_row(allocator: std.mem.Allocator, stmt: *c.sqlite3_stmt) ![]const Column {
+        var list = try std.ArrayListUnmanaged(Column).initCapacity(allocator, 0);
+        errdefer for (list.items) |col| if (col == .text) allocator.free(col.text);
+        defer list.deinit(allocator);
+
+        const col_count: c_int = c.sqlite3_column_count(stmt);
+
+        for (0..@intCast(col_count)) |i| {
+            const index: c_int = @intCast(i);
+            const col_type = c.sqlite3_column_type(stmt, index);
+            const value: Column = switch (col_type) {
+                c.SQLITE_INTEGER => .{ .integer = @intCast(c.sqlite3_column_int64(stmt, index)) },
+                c.SQLITE_FLOAT => .{ .double = @floatCast(c.sqlite3_column_double(stmt, index)) },
+                c.SQLITE_TEXT => .{
+                    .text = try allocator.dupe(u8, std.mem.span(c.sqlite3_column_text(stmt, index))),
+                },
+                c.SQLITE_NULL => .none,
+                else => unreachable,
+            };
+
+            try list.append(allocator, value);
+        }
+
+        return try list.toOwnedSlice(allocator);
+    }
+
+    const Row = struct {
+        arena: std.heap.ArenaAllocator,
+        columns: []const Column,
+
+        pub fn deinit(self: Row) void {
+            self.arena.deinit();
+        }
+    };
+
+    pub fn fetch_row(
+        self: Sqlite,
+        parent_allocator: std.mem.Allocator,
+        comptime sql: []const u8,
+        params: anytype,
+    ) !Row {
+        var arena = std.heap.ArenaAllocator.init(parent_allocator);
+        errdefer arena.deinit();
+        const allocator = arena.allocator();
+
+        var stmt: ?*c.sqlite3_stmt = null;
+
+        const rc = c.sqlite3_prepare_v2(self.db, sql.ptr, @intCast(sql.len), &stmt, null);
+        if (rc != c.SQLITE_OK) {
+            log.err("sqlite3 prepare failed: {s}", .{c.sqlite3_errmsg(self.db)});
+            return error.FailedPrepare;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        try bind_params(stmt.?, params);
+
+        switch (c.sqlite3_step(stmt)) {
+            c.SQLITE_ROW => {
+                const columns = try parse_row(allocator, stmt.?);
+                return .{ .arena = arena, .columns = columns };
+            },
+            c.SQLITE_DONE => return error.NotFound,
+            else => unreachable,
+        }
+    }
+
+    pub fn fetch_rows(
+        self: Sqlite,
+        parent_allocator: std.mem.Allocator,
+        comptime sql: []const u8,
+        params: anytype,
+    ) ![]const Row {
+        var stmt: ?*c.sqlite3_stmt = null;
+
+        const rc = c.sqlite3_prepare_v2(self.db, sql.ptr, @intCast(sql.len), &stmt, null);
+        if (rc != c.SQLITE_OK) {
+            log.err("sqlite3 prepare failed: {s}", .{c.sqlite3_errmsg(self.db)});
+            return error.FailedPrepare;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        try bind_params(stmt.?, params);
+
+        var list = try std.ArrayListUnmanaged(Row).initCapacity(parent_allocator, 0);
+        errdefer for (list.items) |row| row.deinit();
+        defer list.deinit(parent_allocator);
+
+        while (true) {
+            switch (c.sqlite3_step(stmt)) {
+                c.SQLITE_ROW => {
+                    var arena = std.heap.ArenaAllocator.init(parent_allocator);
+                    errdefer arena.deinit();
+
+                    const columns = try parse_row(arena.allocator(), stmt.?);
+                    const row = .{ .arena = arena, .columns = columns };
+
+                    try list.append(parent_allocator, row);
+                },
+                c.SQLITE_DONE => return try list.toOwnedSlice(parent_allocator),
+                else => unreachable,
+            }
+        }
+    }
+
+    // TODO: fetch_iterator
 };
+
+const testing = @import("std").testing;
+
+test "Sqlite: General Flow" {
+    const User = struct {
+        name: []const u8,
+        age: i32,
+        weight: f32 = 10.0,
+    };
+
+    const connection = try Sqlite.open(":memory:");
+    defer connection.close();
+
+    try connection.execute(
+        \\create table if not exists users (
+        \\id integer primary key,
+        \\name text not null,
+        \\age integer
+        \\)
+    , .{});
+
+    try connection.execute(
+        \\insert into users (name, age) values (?, ?)
+    , .{ "Alice", 25 });
+
+    try connection.execute(
+        \\insert into users (name, age) values (?, ?)
+    , .{ "Jane", 99 });
+
+    try connection.execute(
+        \\insert into users (name, age) values (?, ?)
+    , .{ "Girl", 7 });
+
+    const john = try connection.fetch_optional(testing.allocator, User,
+        \\select name, age from users
+        \\where name = ?
+    , .{"John"});
+
+    try testing.expectEqual(null, john);
+
+    const all_users = try connection.fetch_all(testing.allocator, User,
+        \\select name, age from users
+    , .{});
+
+    defer testing.allocator.free(all_users);
+    defer for (all_users) |user| testing.allocator.free(user.name);
+
+    try testing.expectEqual(all_users.len, 3);
+
+    for (all_users) |user| {
+        try testing.expectEqual(10.0, user.weight);
+    }
+
+    const row = try connection.fetch_row(testing.allocator, "select age from users", .{});
+    defer row.deinit();
+
+    try testing.expectEqual(1, row.columns.len);
+    switch (row.columns[0]) {
+        .integer => {},
+        else => std.debug.panic("got incorrect type: {}", .{row.columns[0]}),
+    }
+
+    const rows = try connection.fetch_rows(testing.allocator, "select name from users", .{});
+    defer testing.allocator.free(rows);
+    defer for (rows) |r| r.deinit();
+
+    for (rows) |r| for (r.columns) |col| switch (col) {
+        .text => {},
+        else => std.debug.panic("got incorrect type: {}", .{col}),
+    };
+}

@@ -27,9 +27,12 @@ pub fn build(b: *std.Build) void {
     add_example(b, "sqlite", false, target, optimize, sqlt);
 
     const tests = b.addTest(.{
-        .name = "unit-test",
-        .root_source_file = b.path("./src/unit_test.zig"),
+        .name = "tests",
+        .root_source_file = b.path("./src/tests.zig"),
+        .link_libc = true,
     });
+
+    tests.linkLibrary(sqlite3);
     tests.root_module.addImport("tardy", tardy);
 
     const run_test = b.addRunArtifact(tests);
