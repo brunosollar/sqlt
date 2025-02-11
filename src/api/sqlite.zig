@@ -39,7 +39,7 @@ pub const Sqlite = struct {
         index: c_int,
     ) c_int {
         return switch (@typeInfo(T)) {
-            .Int => |info| if (info.bits < 32)
+            .Int => |info| if (info.bits <= 32)
                 c.sqlite3_bind_int(stmt, index, @intCast(value))
             else
                 c.sqlite3_bind_int64(stmt, index, @intCast(value)),
@@ -147,17 +147,17 @@ pub const Sqlite = struct {
         const struct_fields = struct_info.Struct.fields;
 
         const col_count: c_int = c.sqlite3_column_count(stmt);
-        var set_fields: [struct_fields.len]bool = .{false} ** struct_fields.len;
+        var set_fields: [struct_fields.len]u1 = .{0} ** struct_fields.len;
 
         inline for (std.meta.fields(T), 0..) |field, i| {
             if (@typeInfo(field.type) == .Optional) {
                 @field(result, field.name) = null;
-                set_fields[i] = true;
+                set_fields[i] = 1;
             }
 
             if (field.default_value) |default| {
                 @field(result, field.name) = @as(*const field.type, @ptrCast(@alignCast(default))).*;
-                set_fields[i] = true;
+                set_fields[i] = 1;
             }
         }
 
@@ -168,12 +168,12 @@ pub const Sqlite = struct {
                 if (std.mem.eql(u8, field.name, std.mem.span(col_name))) {
                     const value = try parse_column(allocator, field.type, field.name, index, stmt);
                     @field(result, field.name) = value;
-                    set_fields[j] = true;
+                    set_fields[j] = 1;
                 }
             }
         }
 
-        inline for (set_fields[0..], 0..) |set, i| if (!set) {
+        inline for (set_fields[0..], 0..) |set, i| if (set == 0) {
             log.err("missing required field: {s}", .{struct_fields[i].name});
             return error.MissingRequiredField;
         };

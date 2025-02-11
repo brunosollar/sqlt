@@ -10,7 +10,9 @@ const User = struct {
 };
 
 pub fn main() !void {
-    const allocator = std.heap.page_allocator;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
+    defer _ = gpa.deinit();
 
     const connection = try Sqlite.open("./test.db");
     defer connection.close();
@@ -43,6 +45,9 @@ pub fn main() !void {
     const all_users = try connection.fetch_all(allocator, User,
         \\ select name, age from users
     , .{});
+
+    defer allocator.free(all_users);
+    defer for (all_users) |user| allocator.free(user.name);
 
     std.debug.print("john is {?}\n", .{john});
 
