@@ -25,15 +25,15 @@ pub fn main() !void {
 
     try connection.execute(
         \\insert into users (name, age) values (?, ?)
-    , .{ "Alice", @as(i32, 25) });
+    , .{ "Alice", 25 });
 
     try connection.execute(
         \\insert into users (name, age) values (?, ?)
-    , .{ "Jane", @as(i32, 99) });
+    , .{ "Jane", 99 });
 
     try connection.execute(
         \\insert into users (name, age) values (?, ?)
-    , .{ "Girl", @as(i32, 7) });
+    , .{ "Girl", 7 });
 
     const john = try connection.fetch_optional(allocator, User,
         \\ select name, age from users

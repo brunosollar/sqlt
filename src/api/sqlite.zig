@@ -43,7 +43,8 @@ pub const Sqlite = struct {
                 c.sqlite3_bind_int(stmt, index, @intCast(value))
             else
                 c.sqlite3_bind_int64(stmt, index, @intCast(value)),
-            .Float => c.sqlite3_bind_double(stmt, index, @floatCast(value)),
+            .ComptimeInt => c.sqlite3_bind_int64(stmt, index, @intCast(value)),
+            .Float, .ComptimeFloat => c.sqlite3_bind_double(stmt, index, @floatCast(value)),
             .Optional => |info| if (value) |v|
                 bind_param(info.child, stmt, v, index)
             else
