@@ -1,0 +1,20 @@
+.{
+    .name = "sqlt",
+    .version = "0.1.0",
+    .minimum_zig_version = "0.13.0",
+    .dependencies = .{
+        .tardy = .{
+            .url = "git+https://github.com/mookums/tardy?ref=v0.3.0-rc1#a12b12face4e4833ae8609413d02b6da78657c55",
+            .hash = "12206222f98b9a53fece3b8cfc3675336eab0c79da80569e84d004e8ba05033cd2f4",
+        },
+        .sqlite3 = .{ .path = "vendor/sqlite3" },
+    },
+
+    .paths = .{
+        "README.md",
+        "LICENSE",
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
