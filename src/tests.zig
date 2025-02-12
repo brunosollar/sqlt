@@ -3,5 +3,5 @@ const testing = std.testing;
 
 test "sqlt unit tests" {
     // API
-    testing.refAllDecls(@import("api/sqlite.zig"));
+    testing.refAllDecls(@import("sqlite/lib.zig"));
 }
