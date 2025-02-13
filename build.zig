@@ -24,7 +24,8 @@ pub fn build(b: *std.Build) void {
 
     sqlt.addImport("tardy", tardy);
 
-    add_example(b, "sqlite", false, target, optimize, sqlt);
+    add_example(b, "sqlite", false, target, optimize, tardy, sqlt);
+    add_example(b, "postgres", false, target, optimize, tardy, sqlt);
 
     const tests = b.addTest(.{
         .name = "tests",
@@ -48,6 +49,7 @@ fn add_example(
     link_libc: bool,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.Mode,
+    tardy_module: *std.Build.Module,
     sqlt_module: *std.Build.Module,
 ) void {
     const example = b.addExecutable(.{
@@ -60,6 +62,7 @@ fn add_example(
 
     if (link_libc) example.linkLibC();
 
+    example.root_module.addImport("tardy", tardy_module);
     example.root_module.addImport("sqlt", sqlt_module);
 
     const install_artifact = b.addInstallArtifact(example, .{});
