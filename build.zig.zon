@@ -3,7 +3,10 @@
     .version = "0.1.0",
     .minimum_zig_version = "0.13.0",
     .dependencies = .{
-        .tardy = .{ .path = "../../mookums/tardy" },
+        .tardy = .{
+            .url = "git+https://github.com/mookums/tardy#811e4f759973cc21a159f2c73b6c8a5e14d9e609",
+            .hash = "1220126e8a75e55dc67b2a8000af8aafbab503f476bda1f8ed31540cbda1e2ed7401",
+        },
         .sqlite3 = .{ .path = "vendor/sqlite3" },
     },
 
