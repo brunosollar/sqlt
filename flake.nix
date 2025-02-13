@@ -21,7 +21,7 @@
         zigVersion = "0.13.0";
         withZls = true;
 
-        extraPackages = with pkgs; [termdbms];
+        extraPackages = with pkgs; [rainfrog];
       };
     });
 }

@@ -3,13 +3,13 @@ const log = std.log.scoped(.@"sqlt/postgres");
 const tardy = @import("tardy");
 
 const Message = @import("message.zig").Message;
-const StartupMessage = @import("message.zig").StartupMessage;
 const Wire = @import("wire.zig").Wire;
 
 const Runtime = tardy.Runtime;
 const Socket = tardy.Socket;
 
 pub const Postgres = struct {
+    rt: *Runtime,
     socket: Socket,
     wire: Wire,
 
@@ -19,6 +19,34 @@ pub const Postgres = struct {
         database: ?[]const u8 = null,
         replication: enum { true, false, database } = .false,
     };
+
+    // Basically, drives the Wire engine until we get a ReadyForQuery
+    // or an Error.
+    fn drive(self: *Postgres) !void {
+        while (true) {
+            const recv_buffer = try self.wire.next_recv();
+            const read = try self.socket.recv(self.rt, recv_buffer);
+            self.wire.mark_recv(read);
+
+            log.debug("read count={d}", .{read});
+            while (try self.wire.process_recv()) |m| {
+                log.debug("msg type: {s}", .{@tagName(m)});
+                switch (m) {
+                    .ReadyForQuery => return,
+                    .ErrorResponse => |_| return error.ConnectionFailed,
+                    .CommandComplete => |tag| {
+                        log.info("command complete: {s}", .{tag});
+                    },
+                    .ParameterStatus => |inner| {
+                        log.info("parameter: {s}={s}", .{ inner.name, inner.value });
+                    },
+                    else => continue,
+                }
+            }
+
+            log.info("processed={d}", .{self.wire.bytes_processed});
+        }
+    }
 
     pub fn open(
         rt: *Runtime,
@@ -41,17 +69,17 @@ pub const Postgres = struct {
         var wire = try Wire.init(rt.allocator);
         errdefer wire.deinit();
 
-        var builder = try StartupMessage.Builder.init(rt.allocator);
-        try builder.add_parameter(.{ "user", options.user });
-        if (options.password) |password| try builder.add_parameter(.{ "password", password });
-        if (options.database) |database| try builder.add_parameter(.{ "database", database });
-        try builder.add_parameter(.{ "replication", @tagName(options.replication) });
+        var startup = Message.Frontend.StartupMessage{
+            .pairs = &.{
+                .{ "user", options.user },
+                .{ "database", options.database orelse options.user },
+                .{ "replication", @tagName(options.replication) },
+            },
+        };
+        try startup.print(wire.send_buffer.writer(wire.allocator));
 
-        const msg = try builder.build();
-        defer rt.allocator.free(msg.payload);
-
-        try msg.write(wire.send_buffer.writer(wire.allocator));
         _ = try connected.send_all(rt, wire.send_buffer.items);
+        log.debug("not-working startup: {any}", .{wire.send_buffer.items});
         wire.send_buffer.clearRetainingCapacity();
 
         while (true) {
@@ -63,7 +91,7 @@ pub const Postgres = struct {
             while (try wire.process_recv()) |m| {
                 log.debug("msg type: {s}", .{@tagName(m)});
                 switch (m) {
-                    .ReadyForQuery => return .{ .socket = connected, .wire = wire },
+                    .ReadyForQuery => return .{ .rt = rt, .socket = connected, .wire = wire },
                     .ErrorResponse => |_| return error.ConnectionFailed,
                     .ParameterStatus => |inner| {
                         log.info("parameter: {s}={s}", .{ inner.name, inner.value });
@@ -74,8 +102,16 @@ pub const Postgres = struct {
 
             log.info("processed={d}", .{wire.bytes_processed});
         }
+    }
 
-        return .{ .socket = connected };
+    pub fn execute(self: *Postgres, comptime sql: []const u8, params: anytype) !void {
+        _ = params;
+        var query = Message.Frontend.Query{ .query = sql };
+        try query.print(self.wire.send_buffer.writer(self.wire.allocator));
+        defer self.wire.send_buffer.clearRetainingCapacity();
+
+        _ = try self.socket.send_all(self.rt, self.wire.send_buffer.items);
+        try self.drive();
     }
 
     pub fn close(self: *Postgres) void {

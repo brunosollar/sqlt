@@ -77,6 +77,13 @@ pub const Wire = struct {
                             bytes[5..total_length],
                         );
                         self.bytes_processed += total_length;
+
+                        // Clear if we have processed everything.
+                        if (self.bytes_processed == self.recv_zc_buffer.len) {
+                            self.recv_zc_buffer.clear_retaining_capacity();
+                            self.bytes_processed = 0;
+                        }
+
                         self.parsing = .{};
                         return msg;
                     } else return null;

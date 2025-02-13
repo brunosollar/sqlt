@@ -9,8 +9,20 @@ const Socket = tardy.Socket;
 const Postgres = sqlt.Postgres;
 
 fn main_frame(rt: *Runtime) !void {
-    var postgres = try Postgres.open(rt, "127.0.0.1", 5432, .{ .user = "postgres" });
-    defer postgres.close();
+    var connection = try Postgres.open(rt, "127.0.0.1", 5432, .{
+        .user = "postgres",
+        .database = "postgres",
+    });
+    defer connection.close();
+
+    std.debug.print("now executing SQL command...\n", .{});
+    try connection.execute(
+        \\create table if not exists users (
+        \\id integer primary key,
+        \\name text not null,
+        \\age integer
+        \\)
+    , .{});
 }
 
 pub fn main() !void {
