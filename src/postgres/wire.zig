@@ -54,7 +54,7 @@ pub const Wire = struct {
     }
 
     // This Message is only valid until the next *_recv call into Wire.
-    pub fn process_recv(self: *Wire) !?Message {
+    pub fn process_recv(self: *Wire) !?Message.Backend {
         const bytes = self.recv_zc_buffer.subslice(.{ .start = self.bytes_processed });
         log.debug("bytes length={d}", .{bytes.len});
 
@@ -71,7 +71,11 @@ pub const Wire = struct {
                 .payload => {
                     const total_length: usize = @intCast(self.parsing.length.? + 1);
                     if (bytes.len >= total_length) {
-                        const msg = try Message.parse(self.allocator, self.parsing.kind.?, bytes[5..total_length]);
+                        const msg = try Message.Backend.parse(
+                            self.allocator,
+                            self.parsing.kind.?,
+                            bytes[5..total_length],
+                        );
                         self.bytes_processed += total_length;
                         self.parsing = .{};
                         return msg;
