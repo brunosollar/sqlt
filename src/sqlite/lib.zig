@@ -33,11 +33,11 @@ pub const Sqlite = struct {
     }
 
     fn bind_param(
-        comptime T: type,
         stmt: *c.sqlite3_stmt,
         value: anytype,
         index: c_int,
     ) c_int {
+        const T = @TypeOf(value);
         return switch (@typeInfo(T)) {
             .Int => |info| if (info.bits <= 32)
                 c.sqlite3_bind_int(stmt, index, @intCast(value))
@@ -45,10 +45,11 @@ pub const Sqlite = struct {
                 c.sqlite3_bind_int64(stmt, index, @intCast(value)),
             .ComptimeInt => c.sqlite3_bind_int64(stmt, index, @intCast(value)),
             .Float, .ComptimeFloat => c.sqlite3_bind_double(stmt, index, @floatCast(value)),
-            .Optional => |info| if (value) |v|
-                bind_param(info.child, stmt, v, index)
+            .Optional => |_| if (value) |v|
+                bind_param(stmt, v, index)
             else
                 c.sqlite3_bind_null(stmt, index),
+            .Null => c.sqlite3_bind_null(stmt, index),
             .Pointer => |ptr_info| switch (ptr_info.size) {
                 .Slice => switch (ptr_info.child) {
                     u8 => c.sqlite3_bind_text(
@@ -60,23 +61,21 @@ pub const Sqlite = struct {
                     ),
                     else => @compileError("Unsupported slice type: " ++ @typeName(T)),
                 },
-                .One => bind_param(ptr_info.child, stmt, value, index),
+                .One => bind_param(stmt, value.*, index),
                 else => @compileError("Unsupported pointer type: " ++ @typeName(T)),
             },
             .Array => |info| switch (info.child) {
                 u8 => c.sqlite3_bind_text(
                     stmt,
                     index,
-                    value.ptr,
+                    &value,
                     @intCast(value.len),
                     c.SQLITE_STATIC,
                 ),
                 else => @compileError("Unsupported array type: " ++ @typeName(T)),
             },
-            else => switch (T) {
-                bool => c.sqlite3_bind_int(stmt, index, @intFromBool(value)),
-                else => @compileError("Unsupported type for sqlite binding: " ++ @typeName(T)),
-            },
+            .Bool => c.sqlite3_bind_int(stmt, index, @intFromBool(value)),
+            else => @compileError("Unsupported type for sqlite binding: " ++ @typeName(T)),
         };
     }
 
@@ -87,7 +86,7 @@ pub const Sqlite = struct {
         inline for (params_info.Struct.fields, 0..) |field, i| {
             const index: c_int = @intCast(i + 1);
             const value = @field(params, field.name);
-            const rc = bind_param(field.type, stmt, value, index);
+            const rc = bind_param(stmt, value, index);
             if (rc != c.SQLITE_OK) return error.BindError;
         }
     }

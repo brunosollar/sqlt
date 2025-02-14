@@ -5,7 +5,7 @@ const Sqlite = sqlt.Sqlite;
 
 const User = struct {
     name: []const u8,
-    age: i32,
+    age: ?i32,
     weight: f32 = 10.0,
 };
 
@@ -37,6 +37,10 @@ pub fn main() !void {
         \\insert into users (name, age) values (?, ?)
     , .{ "Girl", 7 });
 
+    try connection.execute(
+        \\insert into users (name, age) values (?, ?)
+    , .{ "Adam", null });
+
     const john = try connection.fetch_optional(allocator, User,
         \\ select name, age from users
         \\ where name = ?
@@ -52,7 +56,7 @@ pub fn main() !void {
     std.debug.print("john is {?}\n", .{john});
 
     for (all_users) |user| std.debug.print(
-        "{s}'s age: {d} + weight: {?d}\n",
+        "{s}'s age: {?d} + weight: {?d}\n",
         .{ user.name, user.age, user.weight },
     );
 }

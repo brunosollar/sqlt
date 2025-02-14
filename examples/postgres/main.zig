@@ -9,7 +9,7 @@ const Socket = tardy.Socket;
 const Postgres = sqlt.Postgres;
 
 fn main_frame(rt: *Runtime) !void {
-    var connection = try Postgres.open(rt.allocator, rt, "127.0.0.1", 5432, .{
+    var connection = try Postgres.connect(rt.allocator, rt, "127.0.0.1", 5432, .{
         .user = "postgres",
         .database = "postgres",
     });
@@ -22,14 +22,15 @@ fn main_frame(rt: *Runtime) !void {
         \\create table if not exists users (
         \\id bigserial primary key,
         \\name text not null,
-        \\age integer
+        \\age integer,
+        \\weight real not null
         \\)
     , .{});
 
     try connection.execute(
-        \\insert into users (name, age)
-        \\values ($1, $2)
-    , .{ "John", 25 });
+        \\insert into users (name, age, weight)
+        \\values ($1, $2, $3)
+    , .{ "John", null, @as(f32, 10.2) });
 }
 
 pub fn main() !void {
