@@ -44,7 +44,7 @@ pub const Message = struct {
         CopyOutResponse: struct { format: i8, column_count: i16, formats: []i16 },
         CopyBothRespone: struct { format: i8, column_count: i16, formats: []i16 },
 
-        DataRow: struct { columns: []const ?[]const u8 },
+        DataRow: []const ?[]const u8,
         EmptyQueryResponse,
 
         // TODO: https://www.postgresql.org/docs/current/protocol-error-fields.html
@@ -61,7 +61,7 @@ pub const Message = struct {
         ParseComplete,
         PortalSuspended,
         ReadyForQuery,
-        RowDescription: struct { columns: []const FieldDescription },
+        RowDescription: []const FieldDescription,
 
         Unknown,
 
@@ -112,7 +112,7 @@ pub const Message = struct {
                         }
                     }
 
-                    break :blk .{ .DataRow = .{ .columns = values } };
+                    break :blk .{ .DataRow = values };
                 },
                 'I' => .EmptyQueryResponse,
                 'E' => .ErrorResponse,
@@ -133,6 +133,8 @@ pub const Message = struct {
                         .value = payload[value_start..value_end],
                     } };
                 },
+                '1' => .ParseComplete,
+                's' => .PortalSuspended,
                 'Z' => .ReadyForQuery,
                 'B' => blk: {
                     const column_count = std.mem.readInt(i16, payload[0..2], .big);
@@ -168,7 +170,7 @@ pub const Message = struct {
                         column_pos += 2;
                     }
 
-                    break :blk .{ .RowDescription = .{ .columns = values } };
+                    break :blk .{ .RowDescription = values };
                 },
                 else => blk: {
                     log.warn("got message with ident: {d}", .{ident});
@@ -179,46 +181,6 @@ pub const Message = struct {
     };
 
     pub const Frontend = struct {
-        fn finalize_inner(self: anytype) usize {
-            const T = @TypeOf(self);
-
-            return switch (@typeInfo(T)) {
-                .Int => @sizeOf(T),
-                .Array => |_| blk: {
-                    var sub_length: usize = 0;
-                    for (self) |item| sub_length += finalize_inner(item);
-                    break :blk sub_length;
-                },
-                .Pointer => |ptr_info| switch (ptr_info.size) {
-                    .Slice => blk: {
-                        var sub_length: usize = 0;
-                        for (self) |item| sub_length += finalize_inner(item);
-                        break :blk sub_length;
-                    },
-                    else => @compileError("unsupported pointer type"),
-                },
-                else => @panic("Unsupported type:" ++ @typeName(self) ++ " | " ++ @tagName(@typeInfo(T))),
-            };
-        }
-
-        fn finalize(self: anytype) void {
-            const P = @TypeOf(self);
-            const parent_ptr_info = @typeInfo(P).Pointer;
-
-            const T = parent_ptr_info.child;
-            if (@typeInfo(T) != .Struct) @compileError("can only finalize a struct");
-            const struct_info = @typeInfo(T).Struct;
-
-            var length: usize = 0;
-            inline for (struct_info.fields) |field| {
-                if (comptime std.mem.eql(u8, field.name, "ident")) continue;
-                length += finalize_inner(@field(self, field.name));
-                log.debug("on field: {s} | length={d}", .{ field.name, length });
-            }
-
-            self.length = @intCast(length);
-        }
-
         pub const StartupMessage = struct {
             const Self = @This();
             length: i32 = std.math.maxInt(i32),
@@ -226,12 +188,12 @@ pub const Message = struct {
             pairs: []const [2][]const u8,
 
             pub fn print(self: *Self, writer: anytype) !void {
-                finalize(self);
-                // Do we want to allow length adjustments?
-                for (self.pairs) |_| self.length += 2;
-                self.length += 1;
-
+                var length: usize = @sizeOf(i32) * 2;
+                for (self.pairs) |pair| length += (pair[0].len + 1 + pair[1].len + 1);
+                length += 1;
+                self.length = @intCast(length);
                 assert(self.length != std.math.maxInt(i32));
+
                 try writer.writeInt(i32, self.length, .big);
                 try writer.writeInt(i32, self.protocol, .big);
                 for (self.pairs) |pair| {
@@ -247,17 +209,134 @@ pub const Message = struct {
         pub const Query = struct {
             const Self = @This();
             ident: u8 = 'Q',
-            length: i32 = std.math.maxInt(i32),
             query: []const u8,
 
             pub fn print(self: *Self, writer: anytype) !void {
-                finalize(self);
-                self.length += 1;
-                assert(self.length != std.math.maxInt(i32));
+                var length: usize = @sizeOf(i32);
+                length += self.query.len + 1;
 
                 try writer.writeByte(self.ident);
-                try writer.writeInt(i32, self.length, .big);
+                try writer.writeInt(i32, @intCast(length), .big);
                 try writer.writeAll(self.query);
+                try writer.writeByte(0);
+            }
+        };
+
+        pub const Parse = struct {
+            const Self = @This();
+            ident: u8 = 'P',
+            name_prepared: []const u8 = "",
+            query: []const u8,
+            parameter_types: []const i32 = &.{},
+
+            pub fn print(self: *Self, writer: anytype) !void {
+                var length: usize = @sizeOf(i32);
+                length += self.name_prepared.len + 1;
+                length += self.query.len + 1;
+                // omitted: parameter_type_count
+                length += @sizeOf(i16);
+                length += self.parameter_types.len * @sizeOf(i32);
+
+                try writer.writeByte(self.ident);
+                try writer.writeInt(i32, @intCast(length), .big);
+                try writer.writeAll(self.name_prepared);
+                try writer.writeByte(0);
+                try writer.writeAll(self.query);
+                try writer.writeByte(0);
+                try writer.writeInt(i16, @intCast(self.parameter_types.len), .big);
+                for (self.parameter_types) |pt| {
+                    try writer.writeInt(i32, pt, .big);
+                }
+            }
+        };
+
+        pub const Bind = struct {
+            pub const Parameter = struct {
+                length: i32,
+                value: []const u8,
+            };
+
+            const Self = @This();
+            ident: u8 = 'B',
+            name_portal: []const u8 = "",
+            name_prepared: []const u8 = "",
+            formats: []const i16,
+            parameters: []Parameter,
+            results: []const i16 = &.{},
+
+            pub fn print(self: *Self, writer: anytype) !void {
+                var length: usize = @sizeOf(i32);
+                length += self.name_portal.len + 1;
+                length += self.name_prepared.len + 1;
+                // omitted: format_count
+                length += @sizeOf(i16);
+                length += self.formats.len * @sizeOf(i16);
+                // omitted: parameter_count
+                length += @sizeOf(i16);
+                for (self.parameters) |p| length += @sizeOf(i32) + p.value.len;
+                // omitted: result_count
+                length += @sizeOf(i16);
+                length += @sizeOf(i16) * self.results.len;
+
+                try writer.writeByte(self.ident);
+                try writer.writeInt(i32, @intCast(length), .big);
+                try writer.writeAll(self.name_portal);
+                try writer.writeByte(0);
+                try writer.writeAll(self.name_prepared);
+                try writer.writeByte(0);
+                try writer.writeInt(i16, @intCast(self.formats.len), .big);
+                for (self.formats) |f| try writer.writeInt(i16, f, .big);
+                try writer.writeInt(i16, @intCast(self.parameters.len), .big);
+                for (self.parameters) |p| {
+                    try writer.writeInt(i32, p.length, .big);
+                    try writer.writeAll(p.value);
+                }
+                try writer.writeInt(i16, @intCast(self.results.len), .big);
+                for (self.results) |r| try writer.writeInt(i16, r, .big);
+            }
+        };
+
+        pub const Execute = struct {
+            const Self = @This();
+            ident: u8 = 'E',
+            name: []const u8 = "",
+            row_count: i32,
+
+            pub fn print(self: *Self, writer: anytype) !void {
+                var length: usize = @sizeOf(i32);
+                length += self.name.len + 1;
+                length += @sizeOf(i32);
+
+                try writer.writeByte(self.ident);
+                try writer.writeInt(i32, @intCast(length), .big);
+                try writer.writeAll(self.name);
+                try writer.writeByte(0);
+                try writer.writeInt(i32, self.row_count, .big);
+            }
+        };
+
+        pub const Sync = struct {
+            pub fn print(writer: anytype) !void {
+                try writer.writeByte('S');
+                try writer.writeInt(i32, @sizeOf(i32), .big);
+            }
+        };
+
+        pub const Close = struct {
+            const Self = @This();
+            ident: u8 = 'C',
+            kind: enum(u8) { prepared = 'S', portal = 'P' },
+            name: []const u8 = "",
+
+            pub fn print(self: *Self, writer: anytype) !void {
+                var length: usize = @sizeOf(i32);
+                length += @sizeOf(u8);
+                length += self.name.len + 1;
+
+                try writer.writeByte(self.ident);
+                try writer.writeInt(i32, @intCast(length), .big);
+                try writer.writeByte(@intFromEnum(self.kind));
+                try writer.writeAll(self.name);
                 try writer.writeByte(0);
             }
         };

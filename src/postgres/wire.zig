@@ -63,7 +63,7 @@ pub const Wire = struct {
                 .header => {
                     if (bytes.len < 5) return null;
                     self.parsing.kind = bytes[0];
-                    log.debug("got message kind={d}", .{bytes[0]});
+                    log.debug("got message kind={c}", .{bytes[0]});
                     self.parsing.length = std.mem.readInt(i32, bytes[1..5], .big);
                     log.debug("got message length={d}", .{self.parsing.length.?});
                     self.parsing.state = .payload;

@@ -9,20 +9,27 @@ const Socket = tardy.Socket;
 const Postgres = sqlt.Postgres;
 
 fn main_frame(rt: *Runtime) !void {
-    var connection = try Postgres.open(rt, "127.0.0.1", 5432, .{
+    var connection = try Postgres.open(rt.allocator, rt, "127.0.0.1", 5432, .{
         .user = "postgres",
         .database = "postgres",
     });
     defer connection.close();
 
-    std.debug.print("now executing SQL command...\n", .{});
+    try connection.execute("set log_min_messages to 'DEBUG5'", .{});
+    try connection.execute("set client_min_messages to 'DEBUG5'", .{});
+
     try connection.execute(
         \\create table if not exists users (
-        \\id integer primary key,
+        \\id bigserial primary key,
         \\name text not null,
         \\age integer
         \\)
     , .{});
+
+    try connection.execute(
+        \\insert into users (name, age)
+        \\values ($1, $2)
+    , .{ "John", 25 });
 }
 
 pub fn main() !void {
