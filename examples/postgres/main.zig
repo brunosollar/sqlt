@@ -30,7 +30,7 @@ fn main_frame(rt: *Runtime) !void {
     try connection.execute(
         \\insert into users (name, age, weight)
         \\values ($1, $2, $3)
-    , .{ "John", null, @as(f32, 10.2) });
+    , .{ "John", null, 10.2 });
 }
 
 pub fn main() !void {

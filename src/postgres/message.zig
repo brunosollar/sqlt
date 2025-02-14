@@ -18,6 +18,18 @@ const FieldDescription = struct {
 
 // https://www.postgresql.org/docs/current/protocol-message-formats.html
 pub const Message = struct {
+    pub const PgType = enum(i32) {
+        bool = 16,
+        bytea = 17,
+        char = 18,
+        int8 = 20,
+        int2 = 21,
+        int4 = 23,
+        text = 25,
+        float4 = 700,
+        float8 = 701,
+    };
+
     /// For Backend Messages.
     pub const Backend = union(enum) {
         // Using the pre-existing Postgres Naming Convention
@@ -56,7 +68,7 @@ pub const Message = struct {
         // TODO: add fields
         NoticeResponse,
         NotificationResponse: struct { process_id: i32, name: []const u8, payload: []const u8 },
-        ParameterDescription: struct { parameters: []const i32 },
+        ParameterDescription: []const PgType,
         ParameterStatus: struct { name: []const u8, value: []const u8 },
         ParseComplete,
         PortalSuspended,
@@ -118,6 +130,23 @@ pub const Message = struct {
                 'E' => .ErrorResponse,
                 'n' => .NoData,
                 'N' => .NoticeResponse,
+                't' => blk: {
+                    const param_count = std.mem.readInt(i16, payload[0..2], .big);
+                    const param_count_usize: usize = @intCast(param_count);
+
+                    var values = try allocator.alloc(PgType, param_count_usize);
+                    errdefer allocator.free(values);
+
+                    var column_pos: usize = 2;
+                    for (0..param_count_usize) |i| {
+                        const oid = std.mem.readInt(i32, payload[column_pos..][0..@sizeOf(i32)], .big);
+                        column_pos += @sizeOf(i32);
+                        log.debug("oid: {d}", .{oid});
+                        values[i] = std.meta.intToEnum(PgType, oid) catch return error.UnknownPgType;
+                    }
+
+                    break :blk .{ .ParameterDescription = values };
+                },
                 'S' => blk: {
                     const name_end = std.mem.indexOfScalar(u8, payload, 0) orelse return error.InvalidMessage;
                     const value_start = name_end + 1;
@@ -222,6 +251,25 @@ pub const Message = struct {
             }
         };
 
+        pub const Describe = struct {
+            const Self = @This();
+            ident: u8 = 'D',
+            kind: enum(u8) { statement = 'S', portal = 'P' },
+            name: []const u8 = "",
+
+            pub fn print(self: *Self, writer: anytype) !void {
+                var length: usize = @sizeOf(i32);
+                length += @sizeOf(u8);
+                length += self.name.len + 1;
+
+                try writer.writeByte(self.ident);
+                try writer.writeInt(i32, @intCast(length), .big);
+                try writer.writeByte(@intFromEnum(self.kind));
+                try writer.writeAll(self.name);
+                try writer.writeByte(0);
+            }
+        };
+
         pub const Parse = struct {
             const Self = @This();
             ident: u8 = 'P',
@@ -256,12 +304,14 @@ pub const Message = struct {
                 value: []const u8,
             };
 
+            pub const Format = enum(i16) { text = 0, binary = 1 };
+
             const Self = @This();
             ident: u8 = 'B',
             name_portal: []const u8 = "",
             name_prepared: []const u8 = "",
-            formats: []const i16,
-            parameters: []Parameter,
+            formats: []const Format,
+            parameters: []const Parameter,
             results: []const i16 = &.{},
 
             pub fn print(self: *Self, writer: anytype) !void {
@@ -285,7 +335,7 @@ pub const Message = struct {
                 try writer.writeAll(self.name_prepared);
                 try writer.writeByte(0);
                 try writer.writeInt(i16, @intCast(self.formats.len), .big);
-                for (self.formats) |f| try writer.writeInt(i16, f, .big);
+                for (self.formats) |f| try writer.writeInt(i16, @intFromEnum(f), .big);
                 try writer.writeInt(i16, @intCast(self.parameters.len), .big);
                 for (self.parameters) |p| {
                     try writer.writeInt(i32, p.length, .big);
@@ -325,7 +375,7 @@ pub const Message = struct {
         pub const Close = struct {
             const Self = @This();
             ident: u8 = 'C',
-            kind: enum(u8) { prepared = 'S', portal = 'P' },
+            kind: enum(u8) { statement = 'S', portal = 'P' },
             name: []const u8 = "",
 
             pub fn print(self: *Self, writer: anytype) !void {

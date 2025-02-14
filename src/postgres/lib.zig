@@ -1,4 +1,5 @@
 const std = @import("std");
+const assert = std.debug.assert;
 const builtin = @import("builtin");
 const log = std.log.scoped(.@"sqlt/postgres");
 const tardy = @import("tardy");
@@ -78,125 +79,139 @@ pub const Postgres = struct {
         }
     }
 
+    fn bind_float(
+        allocator: std.mem.Allocator,
+        comptime F: type,
+        value: anytype,
+        format: *Message.Frontend.Bind.Format,
+    ) !Message.Frontend.Bind.Parameter {
+        format.* = .binary;
+        const buf = try allocator.alloc(u8, @sizeOf(F));
+        const casted_value: F = @floatCast(value);
+        switch (builtin.cpu.arch.endian()) {
+            .big => std.mem.copyForwards(u8, buf, std.mem.asBytes(&casted_value)),
+            .little => {
+                const bytes = std.mem.asBytes(&casted_value);
+                for (0..buf.len) |i| {
+                    buf[buf.len - 1 - i] = bytes[i];
+                }
+            },
+        }
+
+        return .{ .length = @sizeOf(F), .value = buf };
+    }
+
+    fn bind_int(
+        allocator: std.mem.Allocator,
+        comptime I: type,
+        value: anytype,
+        format: *Message.Frontend.Bind.Format,
+    ) !Message.Frontend.Bind.Parameter {
+        format.* = .binary;
+        const buf = try allocator.alloc(u8, @sizeOf(I));
+        std.mem.writeInt(I, buf[0..@sizeOf(I)], @intCast(value), .big);
+        return .{ .length = @sizeOf(I), .value = buf };
+    }
+
     fn bind_param(
         allocator: std.mem.Allocator,
         value: anytype,
-        format: *i16,
+        format: *Message.Frontend.Bind.Format,
+        pg_type: Message.PgType,
     ) !Message.Frontend.Bind.Parameter {
         const T = @TypeOf(value);
-        switch (@typeInfo(T)) {
-            .Int => |info| {
-                const I = switch (info.bits) {
-                    0...16 => if (info.signedness == .signed) i16 else u16,
-                    17...32 => if (info.signedness == .signed) i32 else u32,
-                    33...64 => if (info.signedness == .signed) i64 else u64,
-                    else => @compileError("Unsupported int bit count"),
+        const t_info = @typeInfo(T);
+
+        switch (t_info) {
+            .Int, .ComptimeInt => {
+                return switch (pg_type) {
+                    .int2 => bind_int(allocator, i16, value, format),
+                    .int4 => bind_int(allocator, i32, value, format),
+                    .int8 => bind_int(allocator, i64, value, format),
+                    else => @panic("trying to bind unsupported type to int: " ++ @typeName(T)),
                 };
-                format.* = 1;
-                const buf = try allocator.alloc(u8, @sizeOf(I));
-                std.mem.writeInt(I, buf[0..@sizeOf(I)], value, .big);
-                return .{ .length = @sizeOf(I), .value = buf };
             },
-            .ComptimeInt => {
-                const I = i64;
-                format.* = 1;
-                var buf = try allocator.alloc(u8, @sizeOf(I));
-                std.mem.writeInt(I, buf[0..@sizeOf(I)], value, .big);
-                return .{ .length = @sizeOf(I), .value = buf };
-            },
-            .Float => |info| {
-                const F = switch (info.bits) {
-                    0...32 => f32,
-                    33...64 => f64,
-                    else => @compileError("Unsupported float bit count"),
+            .Float, .ComptimeFloat => {
+                return switch (pg_type) {
+                    .float4 => bind_float(allocator, f32, value, format),
+                    .float8 => bind_float(allocator, f64, value, format),
+                    else => @panic("trying to bind unsupported type to float: " ++ @typeName(T)),
                 };
-                format.* = 1;
-
-                const buf = try allocator.alloc(u8, @sizeOf(F));
-
-                // writes the float in network (big) order
-                switch (builtin.cpu.arch.endian()) {
-                    .big => std.mem.copyForwards(u8, buf, std.mem.asBytes(&value)),
-                    .little => {
-                        const bytes = std.mem.asBytes(&value);
-                        for (0..buf.len) |i| {
-                            buf[buf.len - 1 - i] = bytes[i];
-                        }
-                    },
-                }
-
-                return .{ .length = @sizeOf(F), .value = buf };
-            },
-            .ComptimeFloat => {
-                const F = f64;
-                format.* = 1;
-                const buf = try allocator.alloc(u8, @sizeOf(F));
-
-                // writes the float in network (big) order
-                switch (builtin.cpu.arch.endian()) {
-                    .big => std.mem.copyForwards(u8, buf, std.mem.asBytes(&value)),
-                    .little => {
-                        const bytes = std.mem.asBytes(&value);
-                        for (0..buf.len) |i| {
-                            buf[buf.len - 1 - i] = bytes[i];
-                        }
-                    },
-                }
-
-                return .{ .length = @sizeOf(F), .value = buf };
             },
             .Optional => |_| if (value) |v| {
-                return try bind_param(allocator, v, format);
+                return try bind_param(allocator, v, format, pg_type);
             } else {
-                format.* = 1;
+                format.* = .binary;
                 return .{ .length = -1, .value = "" };
             },
             .Null => {
-                format.* = 1;
+                format.* = .binary;
                 return .{ .length = -1, .value = "" };
             },
             .Pointer => |ptr_info| switch (ptr_info.size) {
                 .Slice => switch (ptr_info.child) {
-                    u8 => {
-                        format.* = 0;
-                        const buf = try allocator.dupe(u8, value);
-                        return .{ .length = value.len, .value = buf };
+                    u8 => switch (pg_type) {
+                        .text => {
+                            format.* = .text;
+                            const buf = try allocator.dupe(u8, value);
+                            return .{ .length = value.len, .value = buf };
+                        },
+                        .bytea => {
+                            format.* = .binary;
+                            const buf = try allocator.dupe(u8, value);
+                            return .{ .length = value.len, .value = buf };
+                        },
+                        else => @panic("trying to bind unsupported slice type: " ++ @typeName(T)),
                     },
-                    else => @compileError("Unsupported slice type: " ++ @typeName(T)),
+                    else => @compileError("unsupported slice type: " ++ @typeName(T)),
                 },
-                .One => return try bind_param(allocator, value.*, format),
-                else => @compileError("Unsupported pointer type: " ++ @typeName(T)),
+                .One => return try bind_param(allocator, value.*, format, pg_type),
+                else => @compileError("unsupported pointer type: " ++ @typeName(T)),
             },
             .Array => |info| switch (info.child) {
-                u8 => {
-                    format.* = 0;
-                    const buf = try allocator.dupe(u8, &value);
-                    return .{ .length = value.len, .value = buf };
+                u8 => switch (pg_type) {
+                    .text => {
+                        format.* = .text;
+                        const buf = try allocator.dupe(u8, &value);
+                        return .{ .length = value.len, .value = buf };
+                    },
+                    .bytea => {
+                        format.* = .binary;
+                        const buf = try allocator.dupe(u8, &value);
+                        return .{ .length = value.len, .value = buf };
+                    },
+                    else => @panic("trying to bind unsupported array type: " ++ @typeName(T)),
                 },
-                else => @compileError("Unsupported array type: " ++ @typeName(T)),
+                else => @compileError("unsupported array type: " ++ @typeName(T)),
             },
             .Bool => {
-                format.* = 1;
-                const buf = try allocator.alloc(u8, 1);
-                buf[0] = @intFromBool(value);
-                return .{ .length = 1, .value = buf };
+                if (pg_type == .bool) {
+                    format.* = .binary;
+                    const buf = try allocator.alloc(u8, 1);
+                    buf[0] = @intFromBool(value);
+                    return .{ .length = 1, .value = buf };
+                } else @panic("trying to bind unsupported type to bool: " ++ @typeName(T));
             },
-            else => @compileError("Unsupported type for postgres binding: " ++ @typeName(T)),
+            else => @compileError("unsupported type for postgres binding: " ++ @typeName(T)),
         }
     }
 
     fn bind_params(
         allocator: std.mem.Allocator,
-        formats: []i16,
+        formats: []Message.Frontend.Bind.Format,
+        param_types: []const Message.PgType,
         parameters: []Message.Frontend.Bind.Parameter,
         params: anytype,
     ) !void {
+        assert(param_types.len == formats.len);
+        assert(param_types.len == parameters.len);
+
         const params_info = @typeInfo(@TypeOf(params));
         if (params_info != .Struct) @compileError("params must be a tuple or struct");
 
         inline for (params_info.Struct.fields, 0..) |field, i| {
             const value = @field(params, field.name);
-            parameters[i] = try bind_param(allocator, value, &formats[i]);
+            parameters[i] = try bind_param(allocator, value, &formats[i], param_types[i]);
         }
     }
 
@@ -210,8 +225,9 @@ pub const Postgres = struct {
 
         if (field_count == 0) {
             // If we have no params, just send a simple query.
-            var query = Message.Frontend.Query{ .query = sql };
-            try query.print(writer);
+            var query_msg = Message.Frontend.Query{ .query = sql };
+            try query_msg.print(writer);
+
             _ = try self.socket.send_all(self.rt, self.wire.send_buffer.items);
             self.wire.send_buffer.clearRetainingCapacity();
 
@@ -222,7 +238,8 @@ pub const Postgres = struct {
                 while (try self.wire.process_recv()) |m| switch (m) {
                     .ReadyForQuery => return,
                     .ErrorResponse => return error.ConnectionFailed,
-                    .NoticeResponse => continue,
+                    .NoticeResponse, .EmptyQueryResponse => continue,
+                    .CopyInResponse, .CopyOutResponse => continue,
                     .CommandComplete => |tag| log.info("command complete: {s}", .{tag}),
                     .ParameterStatus => |inner| log.info(
                         "parameter: {s}={s}",
@@ -231,8 +248,6 @@ pub const Postgres = struct {
                     // If we returned rows, just free them.
                     .RowDescription => |columns| self.wire.allocator.free(columns),
                     .DataRow => |columns| self.wire.allocator.free(columns),
-                    .EmptyQueryResponse => continue,
-                    .CopyInResponse, .CopyOutResponse => continue,
                     else => log.err("unexpected message: {s}", .{@tagName(m)}),
                 };
             }
@@ -240,15 +255,44 @@ pub const Postgres = struct {
             var parse_msg = Message.Frontend.Parse{ .query = sql };
             try parse_msg.print(writer);
 
-            const formats = try self.allocator.alloc(i16, field_count);
-            defer self.allocator.free(formats);
+            var describe_msg = Message.Frontend.Describe{ .kind = .statement };
+            try describe_msg.print(writer);
 
-            const parameters = try self.allocator.alloc(Message.Frontend.Bind.Parameter, field_count);
-            defer self.allocator.free(parameters);
+            try Message.Frontend.Sync.print(writer);
+
+            _ = try self.socket.send_all(self.rt, self.wire.send_buffer.items);
+            self.wire.send_buffer.clearRetainingCapacity();
+
+            const param_types: []const Message.PgType = blk: {
+                var p_types: ?[]const Message.PgType = null;
+
+                while (true) {
+                    const recv_buffer = try self.wire.next_recv();
+                    const read = try self.socket.recv(self.rt, recv_buffer);
+                    self.wire.mark_recv(read);
+                    while (try self.wire.process_recv()) |m| switch (m) {
+                        .ParameterDescription => |parameters| {
+                            for (parameters) |p| {
+                                log.debug("parameter: {s}", .{@tagName(p)});
+                            }
+                            p_types = parameters;
+                        },
+                        .RowDescription, .NoData => {},
+                        .ReadyForQuery => break :blk p_types.?,
+                        .ErrorResponse => return error.Failed,
+                        else => log.err("unexpected message: {s}", .{@tagName(m)}),
+                    };
+                }
+            };
+            defer self.wire.allocator.free(param_types);
 
             var arena = std.heap.ArenaAllocator.init(self.wire.allocator);
             defer arena.deinit();
-            try bind_params(arena.allocator(), formats, parameters, params);
+
+            const arena_allocator = arena.allocator();
+            const formats = try arena_allocator.alloc(Message.Frontend.Bind.Format, field_count);
+            const parameters = try arena_allocator.alloc(Message.Frontend.Bind.Parameter, field_count);
+            try bind_params(arena_allocator, formats, param_types, parameters, params);
 
             var bind_msg = Message.Frontend.Bind{ .formats = formats, .parameters = parameters };
             try bind_msg.print(writer);
