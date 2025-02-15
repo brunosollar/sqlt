@@ -6,18 +6,10 @@ pub fn Pair(comptime A: type, comptime B: type) type {
     return struct { A, B };
 }
 
-const FieldDescription = struct {
-    name: []const u8,
-    table_oid: i32,
-    attr_num: i16,
-    oid: i32,
-    typlen: i16,
-    atttypmod: i32,
-    format: i16,
-};
-
 // https://www.postgresql.org/docs/current/protocol-message-formats.html
 pub const Message = struct {
+    pub const Format = enum(i16) { text = 0, binary = 1 };
+
     pub const PgType = enum(i32) {
         bool = 16,
         bytea = 17,
@@ -28,6 +20,16 @@ pub const Message = struct {
         text = 25,
         float4 = 700,
         float8 = 701,
+    };
+
+    pub const FieldDescription = struct {
+        name: []const u8,
+        table_oid: i32,
+        col_number: i16,
+        pg_type: Message.PgType,
+        pg_type_size: i16,
+        pg_type_attr: i32,
+        format: Format,
     };
 
     /// For Backend Messages.
@@ -141,8 +143,10 @@ pub const Message = struct {
                     for (0..param_count_usize) |i| {
                         const oid = std.mem.readInt(i32, payload[column_pos..][0..@sizeOf(i32)], .big);
                         column_pos += @sizeOf(i32);
-                        log.debug("oid: {d}", .{oid});
-                        values[i] = std.meta.intToEnum(PgType, oid) catch return error.UnknownPgType;
+                        values[i] = std.meta.intToEnum(PgType, oid) catch {
+                            log.err("unrecognized oid: {d}", .{oid});
+                            return error.UnknownPgType;
+                        };
                     }
 
                     break :blk .{ .ParameterDescription = values };
@@ -165,7 +169,7 @@ pub const Message = struct {
                 '1' => .ParseComplete,
                 's' => .PortalSuspended,
                 'Z' => .ReadyForQuery,
-                'B' => blk: {
+                'T' => blk: {
                     const column_count = std.mem.readInt(i16, payload[0..2], .big);
                     const column_count_usize: usize = @intCast(column_count);
 
@@ -178,24 +182,32 @@ pub const Message = struct {
 
                         const sentinel = std.mem.indexOfSentinel(u8, 0, @ptrCast(&payload[column_pos]));
                         value_ptr.name = payload[column_pos..][0..sentinel];
-                        column_pos = sentinel;
+                        column_pos += value_ptr.name.len + 1;
 
                         value_ptr.table_oid = std.mem.readInt(i32, payload[column_pos..][0..4], .big);
                         column_pos += 4;
 
-                        value_ptr.attr_num = std.mem.readInt(i16, payload[column_pos..][0..2], .big);
+                        value_ptr.col_number = std.mem.readInt(i16, payload[column_pos..][0..2], .big);
                         column_pos += 2;
 
-                        value_ptr.oid = std.mem.readInt(i32, payload[column_pos..][0..4], .big);
+                        const type_oid = std.mem.readInt(i32, payload[column_pos..][0..4], .big);
+                        value_ptr.pg_type = std.meta.intToEnum(PgType, type_oid) catch {
+                            log.err("unrecognized oid: {d}", .{type_oid});
+                            return error.UnknownPgType;
+                        };
                         column_pos += 4;
 
-                        value_ptr.typlen = std.mem.readInt(i16, payload[column_pos..][0..2], .big);
+                        value_ptr.pg_type_size = std.mem.readInt(i16, payload[column_pos..][0..2], .big);
                         column_pos += 2;
 
-                        value_ptr.atttypmod = std.mem.readInt(i32, payload[column_pos..][0..4], .big);
+                        value_ptr.pg_type_attr = std.mem.readInt(i32, payload[column_pos..][0..4], .big);
                         column_pos += 4;
 
-                        value_ptr.format = std.mem.readInt(i16, payload[column_pos..][0..2], .big);
+                        const format_int = std.mem.readInt(i16, payload[column_pos..][0..2], .big);
+                        value_ptr.format = std.meta.intToEnum(Format, format_int) catch {
+                            log.err("unrecognized format: {d}", .{format_int});
+                            return error.UnknownFormat;
+                        };
                         column_pos += 2;
                     }
 
@@ -303,8 +315,6 @@ pub const Message = struct {
                 length: i32,
                 value: []const u8,
             };
-
-            pub const Format = enum(i16) { text = 0, binary = 1 };
 
             const Self = @This();
             ident: u8 = 'B',

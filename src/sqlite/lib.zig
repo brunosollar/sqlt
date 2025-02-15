@@ -128,11 +128,11 @@ pub const Sqlite = struct {
                 if (col_type == c.SQLITE_NULL) break :blk null;
                 break :blk @as(T, try parse_field(allocator, info.child, name, index, stmt));
             },
+            .Bool => if (c.sqlite3_column_int(stmt, index) == 0) false else true,
             else => switch (T) {
                 []const u8,
                 []u8,
                 => try allocator.dupe(u8, std.mem.span(c.sqlite3_column_text(stmt, index))),
-                bool => if (c.sqlite3_column_int(stmt, index) == 0) false else true,
                 else => @compileError("Unsupported type for sqlite columning: " ++ @typeName(T)),
             },
         };
@@ -142,13 +142,13 @@ pub const Sqlite = struct {
         var result: T = undefined;
 
         const struct_info = @typeInfo(T);
-        if (struct_info != .Struct) @compileError("thing being fetched must be a struct");
+        if (struct_info != .Struct) @compileError("item being parsed must be a struct");
         const struct_fields = struct_info.Struct.fields;
 
         const col_count: c_int = c.sqlite3_column_count(stmt);
         var set_fields: [struct_fields.len]u1 = .{0} ** struct_fields.len;
 
-        inline for (std.meta.fields(T), 0..) |field, i| {
+        inline for (struct_fields, 0..) |field, i| {
             if (@typeInfo(field.type) == .Optional) {
                 @field(result, field.name) = null;
                 set_fields[i] = 1;

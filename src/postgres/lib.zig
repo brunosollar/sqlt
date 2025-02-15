@@ -36,7 +36,10 @@ pub const Postgres = struct {
         const connected: Socket = blk: {
             for (addresses.addrs) |addr| {
                 const socket = try Socket.init_with_address(.tcp, addr);
-                break :blk socket.connect(rt) catch continue;
+                break :blk socket.connect(rt) catch {
+                    socket.close_blocking();
+                    continue;
+                };
             }
 
             return error.ConnectionFailed;
@@ -79,11 +82,270 @@ pub const Postgres = struct {
         }
     }
 
+    pub fn execute(self: *Postgres, comptime sql: []const u8, params: anytype) !void {
+        const params_info = @typeInfo(@TypeOf(params));
+        if (params_info != .Struct) @compileError("params must be a struct");
+        const struct_info = params_info.Struct;
+        const field_count = struct_info.fields.len;
+
+        const writer = self.wire.send_buffer.writer(self.wire.allocator);
+
+        if (field_count == 0) {
+            // If we have no params, just send a simple query.
+            var query_msg = Message.Frontend.Query{ .query = sql };
+            try query_msg.print(writer);
+
+            _ = try self.socket.send_all(self.rt, self.wire.send_buffer.items);
+            self.wire.send_buffer.clearRetainingCapacity();
+
+            while (true) {
+                const recv_buffer = try self.wire.next_recv();
+                const read = try self.socket.recv(self.rt, recv_buffer);
+                self.wire.mark_recv(read);
+                while (try self.wire.process_recv()) |m| switch (m) {
+                    .ReadyForQuery => return,
+                    .ErrorResponse => return error.ConnectionFailed,
+                    .NoticeResponse, .EmptyQueryResponse => continue,
+                    .CopyInResponse, .CopyOutResponse => continue,
+                    .CommandComplete => |tag| log.info("command complete: {s}", .{tag}),
+                    .ParameterStatus => |inner| log.info(
+                        "parameter: {s}={s}",
+                        .{ inner.name, inner.value },
+                    ),
+                    // If we returned rows, just free them.
+                    .RowDescription => |columns| self.wire.allocator.free(columns),
+                    .DataRow => |columns| self.wire.allocator.free(columns),
+                    else => log.err("unexpected message: {s}", .{@tagName(m)}),
+                };
+            }
+        } else {
+            var parse_msg = Message.Frontend.Parse{ .query = sql };
+            try parse_msg.print(writer);
+
+            var describe_msg = Message.Frontend.Describe{ .kind = .statement };
+            try describe_msg.print(writer);
+
+            try Message.Frontend.Sync.print(writer);
+
+            _ = try self.socket.send_all(self.rt, self.wire.send_buffer.items);
+            self.wire.send_buffer.clearRetainingCapacity();
+
+            const param_types: []const Message.PgType = blk: {
+                var p_types: ?[]const Message.PgType = null;
+
+                while (true) {
+                    const recv_buffer = try self.wire.next_recv();
+                    const read = try self.socket.recv(self.rt, recv_buffer);
+                    self.wire.mark_recv(read);
+                    while (try self.wire.process_recv()) |m| switch (m) {
+                        .ParameterDescription => |parameters| {
+                            for (parameters) |p| {
+                                log.debug("parameter: {s}", .{@tagName(p)});
+                            }
+                            p_types = parameters;
+                        },
+                        .NoData => {},
+                        .RowDescription => |columns| self.wire.allocator.free(columns),
+                        .ReadyForQuery => break :blk p_types.?,
+                        .ErrorResponse => return error.Failed,
+                        else => log.err("unexpected message: {s}", .{@tagName(m)}),
+                    };
+                }
+            };
+            defer self.wire.allocator.free(param_types);
+
+            var arena = std.heap.ArenaAllocator.init(self.wire.allocator);
+            defer arena.deinit();
+
+            const arena_allocator = arena.allocator();
+            const formats = try arena_allocator.alloc(Message.Format, field_count);
+            const parameters = try arena_allocator.alloc(Message.Frontend.Bind.Parameter, field_count);
+            try bind_params(arena_allocator, formats, param_types, parameters, params);
+
+            var bind_msg = Message.Frontend.Bind{ .formats = formats, .parameters = parameters };
+            try bind_msg.print(writer);
+
+            var execute_msg = Message.Frontend.Execute{ .row_count = 0 };
+            try execute_msg.print(writer);
+
+            var close_msg = Message.Frontend.Close{ .kind = .portal };
+            try close_msg.print(writer);
+
+            try Message.Frontend.Sync.print(writer);
+            _ = try self.socket.send_all(self.rt, self.wire.send_buffer.items);
+            self.wire.send_buffer.clearRetainingCapacity();
+
+            while (true) {
+                const recv_buffer = try self.wire.next_recv();
+                const read = try self.socket.recv(self.rt, recv_buffer);
+                self.wire.mark_recv(read);
+                while (try self.wire.process_recv()) |m| switch (m) {
+                    .ReadyForQuery => return,
+                    .ErrorResponse => return error.Failed,
+                    else => log.err("unexpected message: {s}", .{@tagName(m)}),
+                };
+            }
+        }
+    }
+
+    pub fn fetch_optional(
+        self: *Postgres,
+        allocator: std.mem.Allocator,
+        comptime T: type,
+        comptime sql: []const u8,
+        params: anytype,
+    ) !?T {
+        const params_info = @typeInfo(@TypeOf(params));
+        if (params_info != .Struct) @compileError("params must be a struct");
+        const struct_info = params_info.Struct;
+        const field_count = struct_info.fields.len;
+
+        const writer = self.wire.send_buffer.writer(self.wire.allocator);
+
+        const t_field_count = @typeInfo(T).Struct.fields.len;
+        var descriptions: [t_field_count]Message.FieldDescription = undefined;
+        var result: ?T = null;
+
+        if (field_count == 0) {
+            // If we have no params, just send a simple query.
+            var query_msg = Message.Frontend.Query{ .query = sql };
+            try query_msg.print(writer);
+
+            _ = try self.socket.send_all(self.rt, self.wire.send_buffer.items);
+            self.wire.send_buffer.clearRetainingCapacity();
+
+            var got_row: bool = false;
+            while (true) {
+                const recv_buffer = try self.wire.next_recv();
+                const read = try self.socket.recv(self.rt, recv_buffer);
+                self.wire.mark_recv(read);
+                while (try self.wire.process_recv()) |m| switch (m) {
+                    .ReadyForQuery => return result,
+                    .ErrorResponse => return error.ConnectionFailed,
+                    .NoticeResponse, .EmptyQueryResponse => continue,
+                    .CopyInResponse, .CopyOutResponse => continue,
+                    .CommandComplete => |tag| log.info("command complete: {s}", .{tag}),
+                    .ParameterStatus => |inner| log.info(
+                        "parameter: {s}={s}",
+                        .{ inner.name, inner.value },
+                    ),
+                    // If we returned rows, just free them.
+                    .RowDescription => |columns| {
+                        // technically these values are valid UNTIL we get a ReadyForQuery.
+                        // this is because we actually dont clear the underlying buffer till then.
+                        std.mem.copyForwards(Message.FieldDescription, descriptions[0..], columns);
+                        for (columns) |col| {
+                            log.info(
+                                "name={s} | col_num={d} |type={s} | format={s}",
+                                .{
+                                    col.name,
+                                    col.col_number,
+                                    @tagName(col.pg_type),
+                                    @tagName(col.format),
+                                },
+                            );
+                        }
+                        self.wire.allocator.free(columns);
+                    },
+                    .DataRow => |columns| {
+                        defer self.wire.allocator.free(columns);
+                        if (got_row) continue;
+                        got_row = true;
+                        result = try parse_struct(allocator, T, &descriptions, columns);
+                    },
+                    else => log.err("unexpected message: {s}", .{@tagName(m)}),
+                };
+            }
+        } else {
+            var parse_msg = Message.Frontend.Parse{ .query = sql };
+            try parse_msg.print(writer);
+
+            var describe_msg = Message.Frontend.Describe{ .kind = .statement };
+            try describe_msg.print(writer);
+
+            try Message.Frontend.Sync.print(writer);
+
+            _ = try self.socket.send_all(self.rt, self.wire.send_buffer.items);
+            self.wire.send_buffer.clearRetainingCapacity();
+
+            const param_types: []const Message.PgType = blk: {
+                var p_types: ?[]const Message.PgType = null;
+
+                while (true) {
+                    const recv_buffer = try self.wire.next_recv();
+                    const read = try self.socket.recv(self.rt, recv_buffer);
+                    self.wire.mark_recv(read);
+                    while (try self.wire.process_recv()) |m| switch (m) {
+                        .ParameterDescription => |parameters| {
+                            for (parameters) |p| {
+                                log.debug("parameter: {s}", .{@tagName(p)});
+                            }
+                            p_types = parameters;
+                        },
+                        .NoData => {},
+                        .RowDescription => |columns| self.wire.allocator.free(columns),
+                        .ReadyForQuery => break :blk p_types.?,
+                        .ErrorResponse => return error.Failed,
+                        else => log.err("unexpected message: {s}", .{@tagName(m)}),
+                    };
+                }
+            };
+            defer self.wire.allocator.free(param_types);
+
+            var arena = std.heap.ArenaAllocator.init(self.wire.allocator);
+            defer arena.deinit();
+
+            const arena_allocator = arena.allocator();
+            const formats = try arena_allocator.alloc(Message.Frontend.Bind.Format, field_count);
+            const parameters = try arena_allocator.alloc(Message.Frontend.Bind.Parameter, field_count);
+            try bind_params(arena_allocator, formats, param_types, parameters, params);
+
+            var bind_msg = Message.Frontend.Bind{ .formats = formats, .parameters = parameters };
+            try bind_msg.print(writer);
+
+            var execute_msg = Message.Frontend.Execute{ .row_count = 0 };
+            try execute_msg.print(writer);
+
+            var close_msg = Message.Frontend.Close{ .kind = .portal };
+            try close_msg.print(writer);
+
+            try Message.Frontend.Sync.print(writer);
+            _ = try self.socket.send_all(self.rt, self.wire.send_buffer.items);
+            self.wire.send_buffer.clearRetainingCapacity();
+
+            while (true) {
+                const recv_buffer = try self.wire.next_recv();
+                const read = try self.socket.recv(self.rt, recv_buffer);
+                self.wire.mark_recv(read);
+                while (try self.wire.process_recv()) |m| switch (m) {
+                    .ReadyForQuery => return,
+                    .ErrorResponse => return error.Failed,
+                    else => log.err("unexpected message: {s}", .{@tagName(m)}),
+                };
+            }
+        }
+    }
+
+    pub fn fetch_one(
+        self: *Postgres,
+        allocator: std.mem.Allocator,
+        comptime T: type,
+        comptime sql: []const u8,
+        params: anytype,
+    ) !T {
+        return try self.fetch_optional(allocator, T, sql, params) orelse return error.NotFound;
+    }
+
+    pub fn close(self: *Postgres) void {
+        self.socket.close_blocking();
+        self.wire.deinit();
+    }
+
     fn bind_float(
         allocator: std.mem.Allocator,
         comptime F: type,
         value: anytype,
-        format: *Message.Frontend.Bind.Format,
+        format: *Message.Format,
     ) !Message.Frontend.Bind.Parameter {
         format.* = .binary;
         const buf = try allocator.alloc(u8, @sizeOf(F));
@@ -105,7 +367,7 @@ pub const Postgres = struct {
         allocator: std.mem.Allocator,
         comptime I: type,
         value: anytype,
-        format: *Message.Frontend.Bind.Format,
+        format: *Message.Format,
     ) !Message.Frontend.Bind.Parameter {
         format.* = .binary;
         const buf = try allocator.alloc(u8, @sizeOf(I));
@@ -116,7 +378,7 @@ pub const Postgres = struct {
     fn bind_param(
         allocator: std.mem.Allocator,
         value: anytype,
-        format: *Message.Frontend.Bind.Format,
+        format: *Message.Format,
         pg_type: Message.PgType,
     ) !Message.Frontend.Bind.Parameter {
         const T = @TypeOf(value);
@@ -198,7 +460,7 @@ pub const Postgres = struct {
 
     fn bind_params(
         allocator: std.mem.Allocator,
-        formats: []Message.Frontend.Bind.Format,
+        formats: []Message.Format,
         param_types: []const Message.PgType,
         parameters: []Message.Frontend.Bind.Parameter,
         params: anytype,
@@ -215,113 +477,107 @@ pub const Postgres = struct {
         }
     }
 
-    pub fn execute(self: *Postgres, comptime sql: []const u8, params: anytype) !void {
-        const params_info = @typeInfo(@TypeOf(params));
-        if (params_info != .Struct) @compileError("params must be a struct");
-        const struct_info = params_info.Struct;
-        const field_count = struct_info.fields.len;
-
-        const writer = self.wire.send_buffer.writer(self.wire.allocator);
-
-        if (field_count == 0) {
-            // If we have no params, just send a simple query.
-            var query_msg = Message.Frontend.Query{ .query = sql };
-            try query_msg.print(writer);
-
-            _ = try self.socket.send_all(self.rt, self.wire.send_buffer.items);
-            self.wire.send_buffer.clearRetainingCapacity();
-
-            while (true) {
-                const recv_buffer = try self.wire.next_recv();
-                const read = try self.socket.recv(self.rt, recv_buffer);
-                self.wire.mark_recv(read);
-                while (try self.wire.process_recv()) |m| switch (m) {
-                    .ReadyForQuery => return,
-                    .ErrorResponse => return error.ConnectionFailed,
-                    .NoticeResponse, .EmptyQueryResponse => continue,
-                    .CopyInResponse, .CopyOutResponse => continue,
-                    .CommandComplete => |tag| log.info("command complete: {s}", .{tag}),
-                    .ParameterStatus => |inner| log.info(
-                        "parameter: {s}={s}",
-                        .{ inner.name, inner.value },
-                    ),
-                    // If we returned rows, just free them.
-                    .RowDescription => |columns| self.wire.allocator.free(columns),
-                    .DataRow => |columns| self.wire.allocator.free(columns),
-                    else => log.err("unexpected message: {s}", .{@tagName(m)}),
-                };
-            }
-        } else {
-            var parse_msg = Message.Frontend.Parse{ .query = sql };
-            try parse_msg.print(writer);
-
-            var describe_msg = Message.Frontend.Describe{ .kind = .statement };
-            try describe_msg.print(writer);
-
-            try Message.Frontend.Sync.print(writer);
-
-            _ = try self.socket.send_all(self.rt, self.wire.send_buffer.items);
-            self.wire.send_buffer.clearRetainingCapacity();
-
-            const param_types: []const Message.PgType = blk: {
-                var p_types: ?[]const Message.PgType = null;
-
-                while (true) {
-                    const recv_buffer = try self.wire.next_recv();
-                    const read = try self.socket.recv(self.rt, recv_buffer);
-                    self.wire.mark_recv(read);
-                    while (try self.wire.process_recv()) |m| switch (m) {
-                        .ParameterDescription => |parameters| {
-                            for (parameters) |p| {
-                                log.debug("parameter: {s}", .{@tagName(p)});
-                            }
-                            p_types = parameters;
-                        },
-                        .RowDescription, .NoData => {},
-                        .ReadyForQuery => break :blk p_types.?,
-                        .ErrorResponse => return error.Failed,
-                        else => log.err("unexpected message: {s}", .{@tagName(m)}),
-                    };
-                }
-            };
-            defer self.wire.allocator.free(param_types);
-
-            var arena = std.heap.ArenaAllocator.init(self.wire.allocator);
-            defer arena.deinit();
-
-            const arena_allocator = arena.allocator();
-            const formats = try arena_allocator.alloc(Message.Frontend.Bind.Format, field_count);
-            const parameters = try arena_allocator.alloc(Message.Frontend.Bind.Parameter, field_count);
-            try bind_params(arena_allocator, formats, param_types, parameters, params);
-
-            var bind_msg = Message.Frontend.Bind{ .formats = formats, .parameters = parameters };
-            try bind_msg.print(writer);
-
-            var execute_msg = Message.Frontend.Execute{ .row_count = 0 };
-            try execute_msg.print(writer);
-
-            var close_msg = Message.Frontend.Close{ .kind = .portal };
-            try close_msg.print(writer);
-
-            try Message.Frontend.Sync.print(writer);
-            _ = try self.socket.send_all(self.rt, self.wire.send_buffer.items);
-            self.wire.send_buffer.clearRetainingCapacity();
-
-            while (true) {
-                const recv_buffer = try self.wire.next_recv();
-                const read = try self.socket.recv(self.rt, recv_buffer);
-                self.wire.mark_recv(read);
-                while (try self.wire.process_recv()) |m| switch (m) {
-                    .ReadyForQuery => return,
-                    .ErrorResponse => return error.Failed,
-                    else => log.err("unexpected message: {s}", .{@tagName(m)}),
-                };
-            }
-        }
+    fn parse_int(comptime I: type, format: Message.Format, bytes: []const u8) !I {
+        return switch (format) {
+            .text => try std.fmt.parseInt(I, bytes, 10),
+            .binary => @intCast(std.mem.readInt(I, bytes[0..@sizeOf(I)], .big)),
+        };
     }
 
-    pub fn close(self: *Postgres) void {
-        self.socket.close_blocking();
-        self.wire.deinit();
+    fn parse_float(comptime F: type, format: Message.Format, bytes: []const u8) !F {
+        return switch (format) {
+            .text => try std.fmt.parseFloat(F, bytes),
+            .binary => switch (builtin.cpu.arch.endian()) {
+                .big => std.mem.bytesToValue(F, bytes[0..@sizeOf(F)]),
+                .little => blk: {
+                    var buf: [@sizeOf(F)]u8 = undefined;
+                    for (0..bytes.len) |i| {
+                        buf[i] = bytes[bytes.len - 1 - i];
+                    }
+                    break :blk std.mem.bytesToValue(F, bytes[0..@sizeOf(F)]);
+                },
+            },
+        };
+    }
+
+    fn parse_field(
+        allocator: std.mem.Allocator,
+        comptime T: type,
+        description: Message.FieldDescription,
+        column: []const u8,
+    ) !T {
+        return switch (@typeInfo(T)) {
+            .Int => switch (description.pg_type) {
+                .int2 => @as(T, @intCast(try parse_int(i16, description.format, column))),
+                .int4 => @as(T, @intCast(try parse_int(i32, description.format, column))),
+                .int8 => @as(T, @intCast(try parse_int(i64, description.format, column))),
+                else => return error.MismatchedTypes,
+            },
+            .Float => switch (description.pg_type) {
+                .float4 => @as(T, @floatCast(try parse_float(f32, description.format, column))),
+                .float8 => @as(T, @floatCast(try parse_float(f64, description.format, column))),
+                else => return error.MismatchedTypes,
+            },
+            .Optional => |info| blk: {
+                break :blk @as(T, try parse_field(allocator, info.child, description, column));
+            },
+            else => switch (T) {
+                []const u8, []u8 => try allocator.dupe(u8, column),
+                else => @compileError("Unsupported type for pg columning: " ++ @typeName(T)),
+            },
+        };
+    }
+
+    fn parse_struct(
+        allocator: std.mem.Allocator,
+        comptime T: type,
+        descriptions: []const Message.FieldDescription,
+        columns: []const ?[]const u8,
+    ) !T {
+        var result: T = undefined;
+
+        const struct_info = @typeInfo(T);
+        if (struct_info != .Struct) @compileError("item being parsed must be a struct");
+        const struct_fields = struct_info.Struct.fields;
+        var set_fields: [struct_fields.len]u1 = .{0} ** struct_fields.len;
+
+        inline for (struct_fields, 0..) |field, i| {
+            if (@typeInfo(field.type) == .Optional) {
+                @field(result, field.name) = null;
+                set_fields[i] = 1;
+            }
+
+            if (field.default_value) |default| {
+                @field(result, field.name) = @as(*const field.type, @ptrCast(@alignCast(default))).*;
+                set_fields[i] = 1;
+            }
+        }
+
+        inline for (struct_fields, 0..) |field, i| {
+            var desc_number: usize = 0;
+            const desc: ?Message.FieldDescription = blk: {
+                for (descriptions, 0..) |desc, j| {
+                    if (std.mem.eql(u8, desc.name, field.name)) {
+                        desc_number = j;
+                        break :blk desc;
+                    }
+                }
+
+                break :blk null;
+            };
+
+            const column = columns[desc_number];
+            if (column) |c| if (desc) |d| {
+                @field(result, field.name) = try parse_field(allocator, field.type, d, c);
+                set_fields[i] = 1;
+            };
+        }
+
+        inline for (set_fields[0..], 0..) |set, i| if (set == 0) {
+            log.err("missing required field: {s}", .{struct_fields[i].name});
+            return error.MissingRequiredField;
+        };
+
+        return result;
     }
 };

@@ -79,7 +79,7 @@ pub const Wire = struct {
                         self.bytes_processed += total_length;
 
                         // Clear if we have processed everything.
-                        if (self.bytes_processed == self.recv_zc_buffer.len) {
+                        if (self.bytes_processed == self.recv_zc_buffer.len and msg == .ReadyForQuery) {
                             self.recv_zc_buffer.clear_retaining_capacity();
                             self.bytes_processed = 0;
                         }
