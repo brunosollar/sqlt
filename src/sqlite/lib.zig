@@ -148,17 +148,13 @@ pub const Sqlite = struct {
         const col_count: c_int = c.sqlite3_column_count(stmt);
         var set_fields: [struct_fields.len]u1 = .{0} ** struct_fields.len;
 
-        inline for (struct_fields, 0..) |field, i| {
-            if (@typeInfo(field.type) == .Optional) {
-                @field(result, field.name) = null;
-                set_fields[i] = 1;
-            }
-
-            if (field.default_value) |default| {
-                @field(result, field.name) = @as(*const field.type, @ptrCast(@alignCast(default))).*;
-                set_fields[i] = 1;
-            }
-        }
+        inline for (struct_fields, 0..) |field, i| if (field.default_value) |default| {
+            @field(result, field.name) = @as(*const field.type, @ptrCast(@alignCast(default))).*;
+            set_fields[i] = 1;
+        } else if (@typeInfo(field.type) == .Optional) {
+            @field(result, field.name) = null;
+            set_fields[i] = 1;
+        };
 
         for (0..@intCast(col_count)) |i| {
             const index: c_int = @intCast(i);

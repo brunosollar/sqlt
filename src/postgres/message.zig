@@ -322,7 +322,7 @@ pub const Message = struct {
             name_prepared: []const u8 = "",
             formats: []const Format,
             parameters: []const Parameter,
-            results: []const i16 = &.{},
+            results: []const Format = &.{},
 
             pub fn print(self: *Self, writer: anytype) !void {
                 var length: usize = @sizeOf(i32);
@@ -352,7 +352,7 @@ pub const Message = struct {
                     try writer.writeAll(p.value);
                 }
                 try writer.writeInt(i16, @intCast(self.results.len), .big);
-                for (self.results) |r| try writer.writeInt(i16, r, .big);
+                for (self.results) |r| try writer.writeInt(i16, @intFromEnum(r), .big);
             }
         };
 

@@ -28,23 +28,44 @@ fn main_frame(rt: *Runtime) !void {
         \\create table if not exists users (
         \\id bigserial primary key,
         \\name text not null,
-        \\age integer,
-        \\weight real not null
+        \\age integer
         \\)
     , .{});
 
     try connection.execute(
-        \\insert into users (name, age, weight)
-        \\values ($1, $2, $3)
-    , .{ "John", null, 10.2 });
+        \\insert into users (name, age) values ($1, $2)
+    , .{ "Alice", 25 });
 
-    const john = try connection.fetch_one(rt.allocator, User,
-        \\ select name, age, weight from users
-        \\ where name = 'John'
+    try connection.execute(
+        \\insert into users (name, age) values ($1, $2)
+    , .{ "Jane", 99 });
+
+    try connection.execute(
+        \\insert into users (name, age) values ($1, $2)
+    , .{ "Girl", 7 });
+
+    try connection.execute(
+        \\insert into users (name, age) values ($1, $2)
+    , .{ "Adam", null });
+
+    const john = try connection.fetch_optional(rt.allocator, User,
+        \\ select name, age from users
+        \\ where name = $1
+    , .{"John"});
+
+    const all_users = try connection.fetch_all(rt.allocator, User,
+        \\ select name, age from users
     , .{});
-    defer rt.allocator.free(john.name);
 
-    std.debug.print("name: {s} | age: {?d} | weight: {d}\n", .{ john.name, john.age, john.weight });
+    defer rt.allocator.free(all_users);
+    defer for (all_users) |user| rt.allocator.free(user.name);
+
+    std.debug.print("john is {?}\n", .{john});
+
+    for (all_users) |user| std.debug.print(
+        "{s}'s age: {?d} + weight: {d}\n",
+        .{ user.name, user.age, user.weight },
+    );
 }
 
 pub fn main() !void {
