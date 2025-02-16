@@ -14,7 +14,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     defer _ = gpa.deinit();
 
-    const connection = try Sqlite.open("./test.db");
+    const connection = try Sqlite.open(":memory:");
     defer connection.close();
 
     try connection.execute(

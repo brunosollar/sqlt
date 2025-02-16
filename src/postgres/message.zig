@@ -2,10 +2,6 @@ const std = @import("std");
 const assert = std.debug.assert;
 const log = std.log.scoped(.@"sqlt/postgres/message");
 
-pub fn Pair(comptime A: type, comptime B: type) type {
-    return struct { A, B };
-}
-
 // https://www.postgresql.org/docs/current/protocol-message-formats.html
 pub const Message = struct {
     pub const Format = enum(i16) { text = 0, binary = 1 };
