@@ -73,7 +73,7 @@ pub const Message = struct {
         ReadyForQuery,
         RowDescription: []const FieldDescription,
 
-        Unknown,
+        Unknown: u8,
 
         pub fn parse(allocator: std.mem.Allocator, ident: u8, payload: []const u8) !Message.Backend {
             return switch (ident) {
@@ -211,7 +211,7 @@ pub const Message = struct {
                 },
                 else => blk: {
                     log.warn("got message with ident: {d}", .{ident});
-                    break :blk .Unknown;
+                    break :blk .{ .Unknown = ident };
                 },
             };
         }
