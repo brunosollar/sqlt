@@ -1,14 +1,18 @@
 const std = @import("std");
 
-pub fn build(b: *std.Build) void {
+pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const sqlt_dir = b.option([]const u8, "sqlt_dir", "Location of your sqlt folder") orelse "./sqlt";
 
     const sqlt = b.addModule("sqlt", .{
         .root_source_file = b.path("src/lib.zig"),
         .target = target,
         .optimize = optimize,
     });
+
+    const migrations = try create_migrations_module(b, sqlt_dir);
+    sqlt.addImport("sqlt_migrations", migrations);
 
     const sqlite3 = b.dependency("sqlite3", .{
         .target = target,
@@ -49,12 +53,14 @@ fn add_example(
     link_libc: bool,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.Mode,
-    tardy_module: *std.Build.Module,
-    sqlt_module: *std.Build.Module,
+    tardy: *std.Build.Module,
+    sqlt: *std.Build.Module,
 ) void {
+    const example_root = b.fmt("./examples/{s}", .{name});
+
     const example = b.addExecutable(.{
         .name = name,
-        .root_source_file = b.path(b.fmt("./examples/{s}/main.zig", .{name})),
+        .root_source_file = b.path(b.fmt("{s}/main.zig", .{example_root})),
         .target = target,
         .optimize = optimize,
         .strip = false,
@@ -62,8 +68,8 @@ fn add_example(
 
     if (link_libc) example.linkLibC();
 
-    example.root_module.addImport("tardy", tardy_module);
-    example.root_module.addImport("sqlt", sqlt_module);
+    example.root_module.addImport("tardy", tardy);
+    example.root_module.addImport("sqlt", sqlt);
 
     const install_artifact = b.addInstallArtifact(example, .{});
     b.getInstallStep().dependOn(&install_artifact.step);
@@ -77,4 +83,50 @@ fn add_example(
     const run_step = b.step(b.fmt("run_{s}", .{name}), b.fmt("Run sqlt example ({s})", .{name}));
     run_step.dependOn(&install_artifact.step);
     run_step.dependOn(&run_artifact.step);
+}
+
+fn create_migrations_module(b: *std.Build, sqlt_dir: []const u8) !*std.Build.Module {
+    const Migration = struct {
+        name: []const u8,
+        contents: []const u8,
+    };
+
+    const MigrationQueue = std.PriorityQueue(Migration, void, struct {
+        fn compare_fn(_: void, first: Migration, second: Migration) std.math.Order {
+            return std.ascii.orderIgnoreCase(first.name, second.name);
+        }
+    }.compare_fn);
+
+    var queue = MigrationQueue.init(b.allocator, {});
+    defer queue.deinit();
+
+    const path = b.fmt("{s}/migrations", .{sqlt_dir});
+
+    var dir = std.fs.cwd().openDir(path, .{ .iterate = true }) catch {
+        const options = b.addOptions();
+        options.addOption(?[]const []const u8, "names", null);
+        options.addOption(?[]const []const u8, "contents", null);
+        return options.createModule();
+    };
+
+    defer dir.close();
+    var it = dir.iterate();
+
+    while (try it.next()) |entry| if (std.mem.endsWith(u8, entry.name, ".sql")) {
+        const contents = try dir.readFileAlloc(b.allocator, entry.name, std.math.maxInt(usize));
+        const migration: Migration = .{ .name = b.dupe(entry.name), .contents = contents };
+        try queue.add(migration);
+    };
+
+    const names = try b.allocator.alloc([]const u8, queue.items.len);
+    const contents = try b.allocator.alloc([]const u8, queue.items.len);
+    for (queue.items, 0..) |item, i| {
+        names[i] = item.name;
+        contents[i] = item.contents;
+    }
+
+    const options = b.addOptions();
+    options.addOption(?[]const []const u8, "names", names);
+    options.addOption(?[]const []const u8, "contents", contents);
+    return options.createModule();
 }

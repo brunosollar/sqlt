@@ -14,39 +14,33 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     defer _ = gpa.deinit();
 
-    const connection = try Sqlite.open(":memory:");
-    defer connection.close();
+    const conn = try Sqlite.open(":memory:");
+    defer conn.close();
 
-    try connection.execute(
-        \\create table if not exists users (
-        \\id integer primary key,
-        \\name text not null,
-        \\age integer
-        \\)
-    , .{});
+    try sqlt.migrate(conn);
 
-    try connection.execute(
+    try conn.execute(
         \\insert into users (name, age) values (?, ?)
     , .{ "Alice", 25 });
 
-    try connection.execute(
+    try conn.execute(
         \\insert into users (name, age) values (?, ?)
     , .{ "Jane", 99 });
 
-    try connection.execute(
+    try conn.execute(
         \\insert into users (name, age) values (?, ?)
     , .{ "Girl", 7 });
 
-    try connection.execute(
+    try conn.execute(
         \\insert into users (name, age) values (?, ?)
     , .{ "Adam", null });
 
-    const john = try connection.fetch_optional(allocator, User,
+    const john = try conn.fetch_optional(allocator, User,
         \\ select name, age from users
         \\ where name = ?
     , .{"John"});
 
-    const all_users = try connection.fetch_all(allocator, User,
+    const all_users = try conn.fetch_all(allocator, User,
         \\ select name, age from users
     , .{});
 

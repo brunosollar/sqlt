@@ -4,8 +4,8 @@
     .minimum_zig_version = "0.13.0",
     .dependencies = .{
         .tardy = .{
-            .url = "git+https://github.com/mookums/tardy#de0a4cbecb03792287ccad06987c7ad77049f42d",
-            .hash = "1220a1a7202ac11563b6bc3ab0e7bc1ba58dfa54c512025d01ea462f03de0e3aa090",
+            .url = "git+https://github.com/mookums/tardy?ref=v0.3.0-rc2#034d19464a52df3176d8bb808028ec5ec8c2058b",
+            .hash = "12205426a0973bcb3200b181d887fadf98099d1ae5694e749e3037d198c48f0a84a0",
         },
         .sqlite3 = .{ .path = "vendor/sqlite3" },
     },

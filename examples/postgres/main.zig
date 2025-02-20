@@ -15,45 +15,38 @@ const User = struct {
 };
 
 fn main_frame(rt: *Runtime) !void {
-    var connection = try Postgres.connect(rt.allocator, rt, "127.0.0.1", 5432, .{
+    var conn = try Postgres.connect(rt.allocator, rt, "127.0.0.1", 5432, .{
         .user = "postgres",
         .database = "postgres",
     });
-    defer connection.close();
+    defer conn.close();
 
-    try connection.execute("set log_min_messages to 'DEBUG5'", .{});
-    try connection.execute("set client_min_messages to 'DEBUG5'", .{});
+    try conn.execute("set log_min_messages to 'DEBUG5'", .{});
+    try conn.execute("set client_min_messages to 'DEBUG5'", .{});
+    try sqlt.migrate(&conn);
 
-    try connection.execute(
-        \\create table if not exists users (
-        \\id bigserial primary key,
-        \\name text not null,
-        \\age integer
-        \\)
-    , .{});
-
-    try connection.execute(
+    try conn.execute(
         \\insert into users (name, age) values ($1, $2)
     , .{ "Alice", 25 });
 
-    try connection.execute(
+    try conn.execute(
         \\insert into users (name, age) values ($1, $2)
     , .{ "Jane", 99 });
 
-    try connection.execute(
+    try conn.execute(
         \\insert into users (name, age) values ($1, $2)
     , .{ "Girl", 7 });
 
-    try connection.execute(
+    try conn.execute(
         \\insert into users (name, age) values ($1, $2)
     , .{ "Adam", null });
 
-    const john = try connection.fetch_optional(rt.allocator, User,
+    const john = try conn.fetch_optional(rt.allocator, User,
         \\ select name, age from users
         \\ where name = $1
     , .{"John"});
 
-    const all_users = try connection.fetch_all(rt.allocator, User,
+    const all_users = try conn.fetch_all(rt.allocator, User,
         \\ select name, age from users
     , .{});
 
