@@ -97,12 +97,12 @@ pub const Postgres = struct {
         writer: anytype,
         descriptions: []Message.FieldDescription,
         row_count: i32,
-    ) !void {
+    ) !std.heap.ArenaAllocator {
         const params_info = @typeInfo(@TypeOf(params));
         const field_count = params_info.Struct.fields.len;
 
         var arena = std.heap.ArenaAllocator.init(self.wire.allocator);
-        defer arena.deinit();
+        errdefer arena.deinit();
         const arena_allocator = arena.allocator();
 
         var parse_msg = Message.Frontend.Parse{ .query = sql };
@@ -165,6 +165,7 @@ pub const Postgres = struct {
         try Message.Frontend.Sync.print(writer);
         _ = try self.socket.send_all(self.rt, self.wire.send_buffer.items);
         self.wire.send_buffer.clearRetainingCapacity();
+        return arena;
     }
 
     pub fn execute(self: *Postgres, comptime sql: []const u8, params: anytype) !void {
@@ -199,7 +200,8 @@ pub const Postgres = struct {
                 };
             }
         } else {
-            try self.send_extended_query(sql, params, writer, &.{}, 0);
+            const arena = try self.send_extended_query(sql, params, writer, &.{}, 0);
+            defer arena.deinit();
 
             while (true) {
                 const recv_buffer = try self.wire.next_recv();
@@ -263,7 +265,8 @@ pub const Postgres = struct {
                 };
             }
         } else {
-            try self.send_extended_query(sql, params, writer, &descriptions, 1);
+            const arena = try self.send_extended_query(sql, params, writer, &descriptions, 0);
+            defer arena.deinit();
 
             while (true) {
                 const recv_buffer = try self.wire.next_recv();
@@ -340,7 +343,8 @@ pub const Postgres = struct {
                 };
             }
         } else {
-            try self.send_extended_query(sql, params, writer, &descriptions, 0);
+            const arena = try self.send_extended_query(sql, params, writer, &descriptions, 0);
+            defer arena.deinit();
 
             while (true) {
                 const recv_buffer = try self.wire.next_recv();
@@ -440,12 +444,12 @@ fn bind_param(
                     .text => {
                         format.* = .text;
                         const buf = try allocator.dupe(u8, value);
-                        return .{ .length = value.len, .value = buf };
+                        return .{ .length = @intCast(value.len), .value = buf };
                     },
                     .bytea => {
                         format.* = .binary;
                         const buf = try allocator.dupe(u8, value);
-                        return .{ .length = value.len, .value = buf };
+                        return .{ .length = @intCast(value.len), .value = buf };
                     },
                     else => @panic("trying to bind unsupported slice type: " ++ @typeName(T)),
                 },

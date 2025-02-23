@@ -23,7 +23,7 @@ fn main_frame(rt: *Runtime) !void {
 
     try conn.execute("set log_min_messages to 'DEBUG5'", .{});
     try conn.execute("set client_min_messages to 'DEBUG5'", .{});
-    try sqlt.migrate(&conn);
+    try sqlt.migrate(rt.allocator, &conn);
 
     try conn.execute(
         \\insert into users (name, age) values ($1, $2)

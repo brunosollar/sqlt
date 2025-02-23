@@ -14,10 +14,10 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     defer _ = gpa.deinit();
 
-    const conn = try Sqlite.open(":memory:");
+    const conn = try Sqlite.open("./test.db");
     defer conn.close();
 
-    try sqlt.migrate(conn);
+    try sqlt.migrate(allocator, conn);
 
     try conn.execute(
         \\insert into users (name, age) values (?, ?)
