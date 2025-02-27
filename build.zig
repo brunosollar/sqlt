@@ -92,8 +92,15 @@ fn create_migrations_module(b: *std.Build, sqlt_dir: []const u8) !*std.Build.Mod
     };
 
     const MigrationQueue = std.PriorityQueue(Migration, void, struct {
+        fn extract_order_id(name: []const u8) usize {
+            const dash_idx = std.mem.indexOfScalar(u8, name, '-') orelse
+                @panic("Migration files must be in the [num]-[name].sql format!");
+            return std.fmt.parseUnsigned(usize, name[0..dash_idx], 10) catch
+                @panic("Migration files must be in the [num]-[name].sql format!");
+        }
+
         fn compare_fn(_: void, first: Migration, second: Migration) std.math.Order {
-            return std.ascii.orderIgnoreCase(first.name, second.name);
+            return std.math.order(extract_order_id(first.name), extract_order_id(second.name));
         }
     }.compare_fn);
 
@@ -118,9 +125,12 @@ fn create_migrations_module(b: *std.Build, sqlt_dir: []const u8) !*std.Build.Mod
         try queue.add(migration);
     };
 
-    const names = try b.allocator.alloc([]const u8, queue.items.len);
-    const contents = try b.allocator.alloc([]const u8, queue.items.len);
-    for (queue.items, 0..) |item, i| {
+    var list = std.ArrayList(Migration).init(b.allocator);
+    while (queue.removeOrNull()) |item| try list.append(item);
+
+    const names = try b.allocator.alloc([]const u8, list.items.len);
+    const contents = try b.allocator.alloc([]const u8, list.items.len);
+    for (list.items, 0..) |item, i| {
         names[i] = item.name;
         contents[i] = item.contents;
     }
