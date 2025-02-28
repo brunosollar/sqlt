@@ -39,11 +39,7 @@ pub const Sqlite = struct {
     ) c_int {
         const T = @TypeOf(value);
         return switch (@typeInfo(T)) {
-            .Int => |info| if (info.bits <= 32)
-                c.sqlite3_bind_int(stmt, index, @intCast(value))
-            else
-                c.sqlite3_bind_int64(stmt, index, @intCast(value)),
-            .ComptimeInt => c.sqlite3_bind_int64(stmt, index, @intCast(value)),
+            .Int, .ComptimeInt => c.sqlite3_bind_int64(stmt, index, @intCast(value)),
             .Float, .ComptimeFloat => c.sqlite3_bind_double(stmt, index, @floatCast(value)),
             .Optional => |_| if (value) |v|
                 bind_param(stmt, v, index)
@@ -75,6 +71,10 @@ pub const Sqlite = struct {
                 else => @compileError("Unsupported array type: " ++ @typeName(T)),
             },
             .Bool => c.sqlite3_bind_int(stmt, index, @intFromBool(value)),
+            .Enum => |info| switch (@typeInfo(info.tag_type)) {
+                .Int, .ComptimeInt => bind_param(stmt, @intFromEnum(value), index),
+                else => @compileError("enums must have a backing integer: " ++ @typeName(T)),
+            },
             else => @compileError("Unsupported type for sqlite binding: " ++ @typeName(T)),
         };
     }
@@ -118,10 +118,7 @@ pub const Sqlite = struct {
         stmt: *c.sqlite3_stmt,
     ) !T {
         return switch (@typeInfo(T)) {
-            .Int => |info| if (info.bits < 32)
-                @as(T, @intCast(c.sqlite3_column_int(stmt, index)))
-            else
-                @as(T, @intCast(c.sqlite3_column_int64(stmt, index))),
+            .Int => @as(T, @intCast(c.sqlite3_column_int64(stmt, index))),
             .Float => @as(T, @floatCast(c.sqlite3_column_double(stmt, index))),
             .Optional => |info| blk: {
                 const col_type = c.sqlite3_column_type(stmt, index);
@@ -129,6 +126,10 @@ pub const Sqlite = struct {
                 break :blk @as(T, try parse_field(allocator, info.child, name, index, stmt));
             },
             .Bool => if (c.sqlite3_column_int(stmt, index) == 0) false else true,
+            .Enum => |info| switch (@typeInfo(info.tag_type)) {
+                .Int, .ComptimeInt => @enumFromInt(c.sqlite3_column_int64(stmt, index)),
+                else => @compileError("enums must have a backing integer: " ++ @typeName(T)),
+            },
             else => switch (T) {
                 []const u8,
                 []u8,

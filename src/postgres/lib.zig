@@ -482,6 +482,15 @@ fn bind_param(
                 return .{ .length = 1, .value = buf };
             } else @panic("trying to bind unsupported type to bool: " ++ @typeName(T));
         },
+        .Enum => |info| switch (@typeInfo(info.tag_type)) {
+            .Int, .ComptimeInt => return switch (pg_type) {
+                .int2 => bind_int(allocator, i16, @intFromEnum(value), format),
+                .int4 => bind_int(allocator, i32, @intFromEnum(value), format),
+                .int8 => bind_int(allocator, i64, @intFromEnum(value), format),
+                else => @panic("trying to bind unsupported enum type: " ++ @typeName(T)),
+            },
+            else => @compileError("enums must have a backing integer: " ++ @typeName(T)),
+        },
         else => @compileError("unsupported type for postgres binding: " ++ @typeName(T)),
     }
 }
@@ -548,6 +557,15 @@ fn parse_field(
         },
         .Optional => |info| blk: {
             break :blk @as(T, try parse_field(allocator, info.child, description, column));
+        },
+        .Enum => |info| switch (@typeInfo(info.tag_type)) {
+            .Int, .ComptimeInt => switch (description.pg_type) {
+                .int2 => @as(T, @enumFromInt(@as(info.tag_type, @intCast(try parse_int(i16, description.format, column))))),
+                .int4 => @as(T, @enumFromInt(@as(info.tag_type, @intCast(try parse_int(i32, description.format, column))))),
+                .int8 => @as(T, @enumFromInt(@as(info.tag_type, @intCast(try parse_int(i64, description.format, column))))),
+                else => return error.MismatchedTypes,
+            },
+            else => @compileError("enums must have a backing integer: " ++ @typeName(T)),
         },
         else => switch (T) {
             []const u8, []u8 => try allocator.dupe(u8, column),
