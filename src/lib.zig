@@ -67,6 +67,7 @@ pub fn migrate(allocator: std.mem.Allocator, db: anytype) !void {
     try db.execute(sql_pack.create_table, .{});
 
     inline for (names, contents) |n, c| {
+        @setEvalBranchQuota(std.math.maxInt(u32));
         const hash: i64 = @bitCast(comptime std.hash.Wyhash.hash(0, c));
 
         const found = try db.fetch_optional(
