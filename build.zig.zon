@@ -1,11 +1,12 @@
 .{
-    .name = "sqlt",
+    .name = .sqlt,
+    .fingerprint = 0x93dd4387b256ce62,
     .version = "0.1.0",
-    .minimum_zig_version = "0.13.0",
+    .minimum_zig_version = "0.14.0",
     .dependencies = .{
         .tardy = .{
-            .url = "git+https://github.com/mookums/tardy#084f5e04b333a68c6b3c433de241f3dcc368b84b",
-            .hash = "1220960cc794c77b2b1fcab1de6fcf37c6c9571433473541007a0a9258dd7f4f8c0b",
+            .url = "git+https://github.com/tardy-org/tardy?ref=v0.3.0#cd454060f3b6006368d53c05ab96cd16c73c34de",
+            .hash = "tardy-0.3.0-69wrgi7PAwDFhO7m0aXae6N15s2b28VIOrnRrSHHake6",
         },
         .sqlite3 = .{ .path = "vendor/sqlite3" },
     },

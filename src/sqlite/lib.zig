@@ -39,15 +39,15 @@ pub const Sqlite = struct {
     ) c_int {
         const T = @TypeOf(value);
         return switch (@typeInfo(T)) {
-            .Int, .ComptimeInt => c.sqlite3_bind_int64(stmt, index, @intCast(value)),
-            .Float, .ComptimeFloat => c.sqlite3_bind_double(stmt, index, @floatCast(value)),
-            .Optional => |_| if (value) |v|
+            .int, .comptime_int => c.sqlite3_bind_int64(stmt, index, @intCast(value)),
+            .float, .comptime_float => c.sqlite3_bind_double(stmt, index, @floatCast(value)),
+            .optional => |_| if (value) |v|
                 bind_param(stmt, v, index)
             else
                 c.sqlite3_bind_null(stmt, index),
-            .Null => c.sqlite3_bind_null(stmt, index),
-            .Pointer => |ptr_info| switch (ptr_info.size) {
-                .Slice => switch (ptr_info.child) {
+            .null => c.sqlite3_bind_null(stmt, index),
+            .pointer => |ptr_info| switch (ptr_info.size) {
+                .slice => switch (ptr_info.child) {
                     u8 => c.sqlite3_bind_text(
                         stmt,
                         index,
@@ -57,10 +57,10 @@ pub const Sqlite = struct {
                     ),
                     else => @compileError("Unsupported slice type: " ++ @typeName(T)),
                 },
-                .One => bind_param(stmt, value.*, index),
+                .one => bind_param(stmt, value.*, index),
                 else => @compileError("Unsupported pointer type: " ++ @typeName(T)),
             },
-            .Array => |info| switch (info.child) {
+            .array => |info| switch (info.child) {
                 u8 => c.sqlite3_bind_text(
                     stmt,
                     index,
@@ -70,9 +70,9 @@ pub const Sqlite = struct {
                 ),
                 else => @compileError("Unsupported array type: " ++ @typeName(T)),
             },
-            .Bool => c.sqlite3_bind_int(stmt, index, @intFromBool(value)),
-            .Enum => |info| switch (@typeInfo(info.tag_type)) {
-                .Int, .ComptimeInt => bind_param(stmt, @intFromEnum(value), index),
+            .bool => c.sqlite3_bind_int(stmt, index, @intFromBool(value)),
+            .@"enum" => |info| switch (@typeInfo(info.tag_type)) {
+                .int, .comptime_int => bind_param(stmt, @intFromEnum(value), index),
                 else => @compileError("enums must have a backing integer: " ++ @typeName(T)),
             },
             else => @compileError("Unsupported type for sqlite binding: " ++ @typeName(T)),
@@ -81,9 +81,9 @@ pub const Sqlite = struct {
 
     fn bind_params(stmt: *c.sqlite3_stmt, params: anytype) !void {
         const params_info = @typeInfo(@TypeOf(params));
-        if (params_info != .Struct) @compileError("params must be a tuple or struct");
+        if (params_info != .@"struct") @compileError("params must be a tuple or struct");
 
-        inline for (params_info.Struct.fields, 0..) |field, i| {
+        inline for (params_info.@"struct".fields, 0..) |field, i| {
             const index: c_int = @intCast(i + 1);
             const value = @field(params, field.name);
             const rc = bind_param(stmt, value, index);
@@ -118,16 +118,16 @@ pub const Sqlite = struct {
         stmt: *c.sqlite3_stmt,
     ) !T {
         return switch (@typeInfo(T)) {
-            .Int => @as(T, @intCast(c.sqlite3_column_int64(stmt, index))),
-            .Float => @as(T, @floatCast(c.sqlite3_column_double(stmt, index))),
-            .Optional => |info| blk: {
+            .int => @as(T, @intCast(c.sqlite3_column_int64(stmt, index))),
+            .float => @as(T, @floatCast(c.sqlite3_column_double(stmt, index))),
+            .optional => |info| blk: {
                 const col_type = c.sqlite3_column_type(stmt, index);
                 if (col_type == c.SQLITE_NULL) break :blk null;
                 break :blk @as(T, try parse_field(allocator, info.child, name, index, stmt));
             },
-            .Bool => if (c.sqlite3_column_int(stmt, index) == 0) false else true,
-            .Enum => |info| switch (@typeInfo(info.tag_type)) {
-                .Int, .ComptimeInt => @enumFromInt(c.sqlite3_column_int64(stmt, index)),
+            .bool => if (c.sqlite3_column_int(stmt, index) == 0) false else true,
+            .@"enum" => |info| switch (@typeInfo(info.tag_type)) {
+                .int, .comptime_int => @enumFromInt(c.sqlite3_column_int64(stmt, index)),
                 else => @compileError("enums must have a backing integer: " ++ @typeName(T)),
             },
             else => switch (T) {
@@ -143,16 +143,16 @@ pub const Sqlite = struct {
         var result: T = undefined;
 
         const struct_info = @typeInfo(T);
-        if (struct_info != .Struct) @compileError("item being parsed must be a struct");
-        const struct_fields = struct_info.Struct.fields;
+        if (struct_info != .@"struct") @compileError("item being parsed must be a struct");
+        const struct_fields = struct_info.@"struct".fields;
 
         const col_count: c_int = c.sqlite3_column_count(stmt);
         var set_fields: [struct_fields.len]u1 = .{0} ** struct_fields.len;
 
-        inline for (struct_fields, 0..) |field, i| if (field.default_value) |default| {
-            @field(result, field.name) = @as(*const field.type, @ptrCast(@alignCast(default))).*;
+        inline for (struct_fields, 0..) |field, i| if (field.defaultValue()) |default| {
+            @field(result, field.name) = default;
             set_fields[i] = 1;
-        } else if (@typeInfo(field.type) == .Optional) {
+        } else if (@typeInfo(field.type) == .optional) {
             @field(result, field.name) = null;
             set_fields[i] = 1;
         };

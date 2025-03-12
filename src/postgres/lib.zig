@@ -36,10 +36,11 @@ pub const Postgres = struct {
         const connected: Socket = blk: {
             for (addresses.addrs) |addr| {
                 const socket = try Socket.init_with_address(.tcp, addr);
-                break :blk socket.connect(rt) catch {
+                socket.connect(rt) catch {
                     socket.close_blocking();
                     continue;
                 };
+                break :blk socket;
             }
 
             return error.ConnectionFailed;
@@ -99,7 +100,7 @@ pub const Postgres = struct {
         row_count: i32,
     ) !std.heap.ArenaAllocator {
         const params_info = @typeInfo(@TypeOf(params));
-        const field_count = params_info.Struct.fields.len;
+        const field_count = params_info.@"struct".fields.len;
 
         var arena = std.heap.ArenaAllocator.init(self.wire.allocator);
         errdefer arena.deinit();
@@ -170,8 +171,8 @@ pub const Postgres = struct {
 
     pub fn execute(self: *Postgres, comptime sql: []const u8, params: anytype) !void {
         const params_info = @typeInfo(@TypeOf(params));
-        if (params_info != .Struct) @compileError("params must be a struct");
-        const struct_info = params_info.Struct;
+        if (params_info != .@"struct") @compileError("params must be a struct");
+        const struct_info = params_info.@"struct";
         const field_count = struct_info.fields.len;
 
         const writer = self.wire.send_buffer.writer(self.wire.allocator);
@@ -224,12 +225,12 @@ pub const Postgres = struct {
         params: anytype,
     ) !?T {
         const params_info = @typeInfo(@TypeOf(params));
-        if (params_info != .Struct) @compileError("params must be a struct");
-        const struct_info = params_info.Struct;
+        if (params_info != .@"struct") @compileError("params must be a struct");
+        const struct_info = params_info.@"struct";
         const field_count = struct_info.fields.len;
 
         const writer = self.wire.send_buffer.writer(self.wire.allocator);
-        var descriptions: [@typeInfo(T).Struct.fields.len]Message.FieldDescription = undefined;
+        var descriptions: [@typeInfo(T).@"struct".fields.len]Message.FieldDescription = undefined;
         var result: ?T = null;
 
         if (field_count == 0) {
@@ -303,12 +304,12 @@ pub const Postgres = struct {
         params: anytype,
     ) ![]const T {
         const params_info = @typeInfo(@TypeOf(params));
-        if (params_info != .Struct) @compileError("params must be a struct");
-        const struct_info = params_info.Struct;
+        if (params_info != .@"struct") @compileError("params must be a struct");
+        const struct_info = params_info.@"struct";
         const field_count = struct_info.fields.len;
 
         const writer = self.wire.send_buffer.writer(self.wire.allocator);
-        var descriptions: [@typeInfo(T).Struct.fields.len]Message.FieldDescription = undefined;
+        var descriptions: [@typeInfo(T).@"struct".fields.len]Message.FieldDescription = undefined;
 
         var list = try std.ArrayListUnmanaged(T).initCapacity(allocator, 0);
         defer list.deinit(allocator);
@@ -413,7 +414,7 @@ fn bind_param(
     const t_info = @typeInfo(T);
 
     switch (t_info) {
-        .Int, .ComptimeInt => {
+        .int, .comptime_int => {
             return switch (pg_type) {
                 .int2 => bind_int(allocator, i16, value, format),
                 .int4 => bind_int(allocator, i32, value, format),
@@ -421,25 +422,25 @@ fn bind_param(
                 else => @panic("trying to bind unsupported type to int: " ++ @typeName(T)),
             };
         },
-        .Float, .ComptimeFloat => {
+        .float, .comptime_float => {
             return switch (pg_type) {
                 .float4 => bind_float(allocator, f32, value, format),
                 .float8 => bind_float(allocator, f64, value, format),
                 else => @panic("trying to bind unsupported type to float: " ++ @typeName(T)),
             };
         },
-        .Optional => |_| if (value) |v| {
+        .optional => |_| if (value) |v| {
             return try bind_param(allocator, v, format, pg_type);
         } else {
             format.* = .binary;
             return .{ .length = -1, .value = "" };
         },
-        .Null => {
+        .null => {
             format.* = .binary;
             return .{ .length = -1, .value = "" };
         },
-        .Pointer => |ptr_info| switch (ptr_info.size) {
-            .Slice => switch (ptr_info.child) {
+        .pointer => |ptr_info| switch (ptr_info.size) {
+            .slice => switch (ptr_info.child) {
                 u8 => switch (pg_type) {
                     .text => {
                         format.* = .text;
@@ -455,10 +456,10 @@ fn bind_param(
                 },
                 else => @compileError("unsupported slice type: " ++ @typeName(T)),
             },
-            .One => return try bind_param(allocator, value.*, format, pg_type),
+            .one => return try bind_param(allocator, value.*, format, pg_type),
             else => @compileError("unsupported pointer type: " ++ @typeName(T)),
         },
-        .Array => |info| switch (info.child) {
+        .array => |info| switch (info.child) {
             u8 => switch (pg_type) {
                 .text => {
                     format.* = .text;
@@ -474,7 +475,7 @@ fn bind_param(
             },
             else => @compileError("unsupported array type: " ++ @typeName(T)),
         },
-        .Bool => {
+        .bool => {
             if (pg_type == .bool) {
                 format.* = .binary;
                 const buf = try allocator.alloc(u8, 1);
@@ -482,8 +483,8 @@ fn bind_param(
                 return .{ .length = 1, .value = buf };
             } else @panic("trying to bind unsupported type to bool: " ++ @typeName(T));
         },
-        .Enum => |info| switch (@typeInfo(info.tag_type)) {
-            .Int, .ComptimeInt => return switch (pg_type) {
+        .@"enum" => |info| switch (@typeInfo(info.tag_type)) {
+            .int, .comptime_int => return switch (pg_type) {
                 .int2 => bind_int(allocator, i16, @intFromEnum(value), format),
                 .int4 => bind_int(allocator, i32, @intFromEnum(value), format),
                 .int8 => bind_int(allocator, i64, @intFromEnum(value), format),
@@ -506,9 +507,9 @@ fn bind_params(
     assert(param_types.len == parameters.len);
 
     const params_info = @typeInfo(@TypeOf(params));
-    if (params_info != .Struct) @compileError("params must be a tuple or struct");
+    if (params_info != .@"struct") @compileError("params must be a tuple or struct");
 
-    inline for (params_info.Struct.fields, 0..) |field, i| {
+    inline for (params_info.@"struct".fields, 0..) |field, i| {
         const value = @field(params, field.name);
         parameters[i] = try bind_param(allocator, value, &formats[i], param_types[i]);
     }
@@ -544,22 +545,22 @@ fn parse_field(
     column: []const u8,
 ) !T {
     return switch (@typeInfo(T)) {
-        .Int => switch (description.pg_type) {
+        .int => switch (description.pg_type) {
             .int2 => @as(T, @intCast(try parse_int(i16, description.format, column))),
             .int4 => @as(T, @intCast(try parse_int(i32, description.format, column))),
             .int8 => @as(T, @intCast(try parse_int(i64, description.format, column))),
             else => return error.MismatchedTypes,
         },
-        .Float => switch (description.pg_type) {
+        .float => switch (description.pg_type) {
             .float4 => @as(T, @floatCast(try parse_float(f32, description.format, column))),
             .float8 => @as(T, @floatCast(try parse_float(f64, description.format, column))),
             else => return error.MismatchedTypes,
         },
-        .Optional => |info| blk: {
+        .optional => |info| blk: {
             break :blk @as(T, try parse_field(allocator, info.child, description, column));
         },
-        .Enum => |info| switch (@typeInfo(info.tag_type)) {
-            .Int, .ComptimeInt => switch (description.pg_type) {
+        .@"enum" => |info| switch (@typeInfo(info.tag_type)) {
+            .int, .comptime_int => switch (description.pg_type) {
                 .int2 => @as(T, @enumFromInt(@as(info.tag_type, @intCast(try parse_int(i16, description.format, column))))),
                 .int4 => @as(T, @enumFromInt(@as(info.tag_type, @intCast(try parse_int(i32, description.format, column))))),
                 .int8 => @as(T, @enumFromInt(@as(info.tag_type, @intCast(try parse_int(i64, description.format, column))))),
@@ -583,15 +584,15 @@ fn parse_struct(
     var result: T = undefined;
 
     const struct_info = @typeInfo(T);
-    if (struct_info != .Struct) @compileError("item being parsed must be a struct");
-    const struct_fields = struct_info.Struct.fields;
+    if (struct_info != .@"struct") @compileError("item being parsed must be a struct");
+    const struct_fields = struct_info.@"struct".fields;
     var set_fields: [struct_fields.len]u1 = .{0} ** struct_fields.len;
 
     inline for (struct_fields, 0..) |field, i| {
-        if (field.default_value) |default| {
-            @field(result, field.name) = @as(*const field.type, @ptrCast(@alignCast(default))).*;
+        if (field.defaultValue()) |default| {
+            @field(result, field.name) = default;
             set_fields[i] = 1;
-        } else if (@typeInfo(field.type) == .Optional) {
+        } else if (@typeInfo(field.type) == .optional) {
             @field(result, field.name) = null;
             set_fields[i] = 1;
         }
