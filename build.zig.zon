@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.14.0",
     .dependencies = .{
         .tardy = .{
-            .url = "git+https://github.com/tardy-org/tardy?ref=v0.3.0#cd454060f3b6006368d53c05ab96cd16c73c34de",
-            .hash = "tardy-0.3.0-69wrgi7PAwDFhO7m0aXae6N15s2b28VIOrnRrSHHake6",
+            .url = "git+https://github.com/brunosollar/tardy?ref=main#1fd01f77fa475753b1b8902838d6619f5f6f666f",
+            .hash = "tardy-0.3.0-69wrgiTqAwAIQDlnXVqvOjCNPQhVjVZMQI_votbW49tu",
         },
         .sqlite3 = .{ .path = "vendor/sqlite3" },
     },
